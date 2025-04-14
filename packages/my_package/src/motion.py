@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+
+import os
+import rospy
+from std_msgs.msg import String
+from duckietown.dtros import DTROS, NodeType
+
+from sensor_msgs.msg import CompressedImage, Image, CameraInfo
+from duckietown_msgs.msg import Twist2DStamped
+import cv2 
+from cv_bridge import CvBridge
+import numpy as np
+from duckietown_msgs.msg import LEDPattern 
+import dt_apriltags as aptag
+
+from std_msgs.msg import Header, ColorRGBA, Int32, String
+import math
+
+class MotionNode(DTROS):
+
+    def __init__(self, node_name):
+        # initialize the DTROS parent class
+        super(MotionNode, self).__init__(node_name=node_name, node_type=NodeType.GENERIC)
+        # static parameters
+        self._vehicle_name = os.environ['VEHICLE_NAME']
+
+        self._camera_topic = f"/{self._vehicle_name}/camera_node/image/compressed"
+        self._camera_info = f"/{self._vehicle_name}/camera_node/camera_info"
+
+        twist_topic = f"/{self._vehicle_name}/car_cmd_switch_node/cmd"
+        self.twisted_publisher = rospy.Publisher(twist_topic, Twist2DStamped, queue_size=1)
+        
+        self._v = 0.4
+        self._omega = 0
+        
+        
+        self._bridge = CvBridge()
+
+        self.sub_info = rospy.Subscriber(self._camera_info, CameraInfo, self.callback_info)
+        self.sub_image = rospy.Subscriber(self._camera_topic, CompressedImage, self.callback_image)
+
+        self.led_topic = f"/{self._vehicle_name}/led_emitter_node/led_pattern"
+        self.led_pub = rospy.Publisher(self.led_topic, LEDPattern, queue_size=1)
+
+        self.K = None
+        self.D = None
+
+        self.undisorted_image = None
+        self.redline_image = None
+        self.leader_duckiebot_image = None
+        self.apriltag_image = None
+        self.gray = None
+
+        self.control_type = "PID"
+        self.proportional_gain = 0.05
+        self.derivative_gain = 0.03
+        self.integral_gain = 0.001
+
+        #color detection
+        self.white_lower = np.array([0, 0, 180], np.uint8) 
+        self.white_upper = np.array([180, 40, 255], np.uint8)
+
+        self.error = 0
+        self.prev_error = 0
+        self.history = np.zeros((1,10))
+        self.history_leader_duckiebot = np.zeros((1,30), dtype=float)
+        self.integral = 0
+        self.calibration = -87
+
+        self.rate = rospy.Rate(10)
+
+        self.timer_avoid_redline = 30
+        self.timer_stop = 10
+        self.counter_avoid_red = 0
+        self.counter_stop = 0
+
+        self.prev_x = (1.0, 1.0, 1.0, 1.0)
+        self.x = (1.0, 1.0, 1.0, 1.0)
+
+        self.mode = 0
+
+        # mode = 0  ->  pid_control
+        # mode = 1  ->  stop for red line
+        # mode = 2  ->  pid avoid stoping before the red line
+        # mode = 3  ->  Sees the leader Duckiebot
+
+        self.count_stops = 0
+        self.predict_turn = "straight"
+
+        self.left_turn_dist = 2
+        self.right_turn_dist = 1
+
+
+        #test
+        self._custom_topic_lane = f"/{self._vehicle_name}/custom_node/image/black"
+        self.pub_lane = rospy.Publisher(self._custom_topic_lane, Image, queue_size=1)
+
+
+    def callback_info(self, msg):
+
+        # https://stackoverflow.com/questions/55781120/subscribe-ros-image-and-camerainfo-sensor-msgs-format
+        # http://docs.ros.org/en/noetic/api/sensor_msgs/html/msg/CameraInfo.html
+        # https://github.com/IntelRealSense/realsense-ros/issues/709ss
+        self.K = np.array(msg.K).reshape(3, 3)
+        self.D = np.array(msg.D)
+
+    def callback_image(self, msg):
+
+        if self.K is None:
+            return
+        image = self._bridge.compressed_imgmsg_to_cv2(msg)
+        # https://docs.opencv.org/4.x/dc/dbb/tutorial_py_calibration.html
+        h,w = image.shape[:2]
+        newcameramtx, roi = cv2.getOptimalNewCameraMatrix(self.K, self.D, (w,h), 1, (w,h))
+        dst = cv2.undistort(image, self.K, self.D, None, newcameramtx)
+        x, y, w, h = roi
+        dst = dst[y:y+h, x:x+w]
+        self.undisorted_image = self.image_preprocess(dst)
+        self.redline_image = self.redline_image_process(self.undisorted_image)
+        self.leader_duckiebot_image = self.leader_duckiebot_image_process(self.undisorted_image)
+        self.apriltag_image = self.apriltag_image_process(self.undisorted_image)
+        self.gray = self.calc_error(self.undisorted_image)
+
+    def redline_image_process(self, img):
+        new_width = 200
+        new_height = 150
+        resized_image = cv2.resize(img, (new_width, new_height), interpolation = cv2.INTER_AREA)
+        return resized_image
+    
+    def leader_duckiebot_image_process(self, img):
+        h, w, _ = img.shape
+        resized_image = img[h//4: , w//4:-w//4, :]
+        return resized_image
+    
+    def apriltag_image_process(self, img):
+        h, w, _ = img.shape
+        resized_image = img[h//4: , w//4:, :]
+        return resized_image
+
+
+    def image_preprocess(self, img):
+
+        new_width = 400
+        new_height = 300
+        resized_image = cv2.resize(img, (new_width, new_height), interpolation = cv2.INTER_AREA)
+        blurred_image = cv2.blur(resized_image, (5, 5)) 
+        return blurred_image
+    
+    def calc_error(self, imageFrame):
+
+        height = imageFrame.shape[0]
+        imageFrame = imageFrame[height//2:-height//5, :, :]
+
+
+        imageFrame = cv2.GaussianBlur(imageFrame, (5, 5), 0)
+
+        kernel = np.ones((5, 5), "uint8") 
+
+        hsvFrame = cv2.cvtColor(imageFrame, cv2.COLOR_BGR2HSV)
+
+        white_mask = cv2.inRange(hsvFrame, self.white_lower, self.white_upper) 
+
+        # For white color 
+        white_mask = cv2.dilate(white_mask, kernel) 
+        res_white = cv2.bitwise_and(imageFrame, imageFrame, 
+                                mask = white_mask) 
+
+        lane_mask = np.zeros_like(white_mask)  
+        lane_mask[white_mask > 0] = 255 
+
+
+        contours, hierarchy = cv2.findContours(lane_mask, 
+                                            cv2.RETR_TREE, 
+                                            cv2.CHAIN_APPROX_SIMPLE) 
+        
+        if len(contours)>0:
+            # Sort contours by area in descending order and pick the top two
+            max_contour = sorted(contours, key=cv2.contourArea, reverse=True)[0]
+
+            x_values = max_contour[:, 0, 0]  # Extracting x-coordinates
+
+            # Compute the average x-coordinate
+            avg_x = np.mean(x_values)
+        else:
+            avg_x = 0
+
+
+        self.error = avg_x- lane_mask.shape[1]/2.0 + self.calibration
+
+        return lane_mask
+        
+    def publish_twisted(self, v, omega):
+
+        message = Twist2DStamped(v=v, omega=omega)
+        self.twisted_publisher.publish(message)
+
+    def pid_controller(self):
+        self.history = np.roll(self.history, shift=-1, axis=1)  # Shift all values left
+        self.history[0, -1] = self.error
+        self.integral = np.sum(self.history)
+        derivative = self.error - self.prev_error 
+        return self.proportional_gain * self.error + self.derivative_gain * derivative + self.integral_gain * self.integral
+
+    def move_pid(self):
+            
+        control = self.pid_controller()
+        self.publish_twisted(v=self._v, omega = -1*control)
+        self.calc_error(self.undisorted_image)
+        
+
+    def stop(self):
+        self.publish_twisted(v = 0, omega = 0)
+
+    def on_shutdown(self):
+        self.publish_twisted(v = 0, omega = 0)
+
+    def detect_red_line(self, image):
+        if image is None:
+            return
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+        red_ranges = {'lower': np.array([0, 150, 50]), 'upper': np.array([10, 255, 255])}
+        
+
+        mask = cv2.inRange(hsv, red_ranges['lower'], red_ranges['upper'])
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(largest_contour) > 900:
+                x, y, w, h = cv2.boundingRect(largest_contour)
+                
+                # Estimate distance based on contour position
+                image_height = image.shape[0]
+                distance = (image_height - (y + h)) / image_height
+                
+                
+                return True
+                    
+        return False
+    
+    def detect_leader_duckiebot(self, image):
+        if image is None:
+            return
+        
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+        black_ranges = {'lower': np.array([110, 150, 100]), 'upper': np.array([120, 250, 200])}
+        
+
+        mask = cv2.inRange(hsv, black_ranges['lower'], black_ranges['upper'])
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(largest_contour)
+            x, y, w, h = cv2.boundingRect(largest_contour)
+
+            return area, x+w//2
+            
+
+
+        return 0.0, image.shape[1]//2
+    
+    def detect_tag(self):
+        detector = aptag.Detector(families="tag36h11")
+        results = detector.detect(self.apriltag)
+        # rospy.loginfo(results)
+       
+           
+        def area(r):
+            # Use corners to compute polygon area
+            (ptA, ptB, ptC, ptD) = r.corners
+            return 0.5 * abs(
+                ptA[0]*ptB[1] + ptB[0]*ptC[1] + ptC[0]*ptD[1] + ptD[0]*ptA[1]
+                - ptB[0]*ptA[1] - ptC[0]*ptB[1] - ptD[0]*ptC[1] - ptA[0]*ptD[1]
+            )
+
+        largest_tag = max(results, key=area)
+
+        tag_id = str(largest_tag.tag_id)
+        if tag_id == 67:
+            return "right"
+        else:
+            return "left"
+    
+    def detect_crosswalk(self, image):
+        if image is None:
+            return
+        
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+        black_ranges = {'lower': np.array([110, 150, 100]), 'upper': np.array([120, 250, 200])}
+        
+
+        mask = cv2.inRange(hsv, black_ranges['lower'], black_ranges['upper'])
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(largest_contour) > 500:
+                
+                return True
+                    
+        return False
+    
+    def publish_leds(self, x):      
+        if self.gray is not None:
+            msg = LEDPattern()
+            msg.header = Header()
+            msg.header.stamp = rospy.Time.now()
+            color_msg = ColorRGBA()
+            color_msg.r, color_msg.g, color_msg.b, color_msg.a = x
+
+
+            # Set LED colors
+            msg.rgb_vals = [color_msg] * 5
+            self.led_pub.publish(msg) 
+        pass
+
+    def detect_ducks(self, image):
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        duck_ranges = {'lower': np.array([9, 91, 163]), 'upper': np.array([22, 255, 255])}
+    
+        mask = cv2.inRange(hsv, duck_ranges['lower'], duck_ranges['upper'])
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+            return cv2.contourArea(largest_contour) > 500
+                  
+
+    def predict_leader_turn(self, middle):
+        if middle < 75 and math.abs(middle - 75) > 30:
+            return "left"
+        if middle > 75 and math.abs(middle - 75) > 30:
+            return "right"
+        return "straight"
+    
+    def turn_left(self):
+        distance_traveled = 0
+        dt = 0.1
+
+        while distance_traveled < self.left_turn_dist:
+            self.publish_twisted(v=self._v, omega = 2)
+            self.calc_error(self.undisorted_image)
+            self.rate.sleep()
+            distance_traveled += self._v * dt 
+
+    def turn_right(self):
+        distance_traveled = 0
+        dt = 0.1
+
+        while distance_traveled < self.right_turn_dist:
+            self.publish_twisted(v=self._v, omega = -3)
+            self.calc_error(self.undisorted_image)
+            self.rate.sleep()
+            distance_traveled += self._v * dt     
+
+    def run(self):
+        
+
+        self.rate.sleep()
+        rospy.loginfo(self.predict_turn)
+
+        leader_size, leader_middle = self.detect_leader_duckiebot(self.leader_duckiebot_image)
+
+        self.history_leader_duckiebot = np.roll(self.history_leader_duckiebot, shift=-1, axis=1)  # Shift all values left
+        self.history_leader_duckiebot[0, -1] = leader_size
+
+        self.predict_turn = self.predict_leader_turn(leader_middle)
+
+        # checking if we should change the mode based on the info we are getting
+        if self.mode == 4 or self.mode == 5:
+            self.mode == 0
+
+        if self.mode == 1 and self.counter_stop < self.timer_stop: # 1 -> 1 stop for some time before the red line
+            self.counter_stop += 1
+
+        if self.mode == 1 and self.counter_stop == self.timer_stop: # 1 -> 2 start moving without detecting the red line  
+            if self.predict_turn == "straight":
+                self.mode = 2
+            elif self.predict_turn == "left":
+                self.mode = 4
+            elif self.predict_turn == "right":
+                self.mode = 5
+            self.counter_stop = 0
+
+        if self.mode == 0 and np.average(self.history_leader_duckiebot) >=15: # 0 -> 3 if see the leader duckiebot
+            self.mode = 3
+
+        if (self.mode == 0 or self.mode == 3) and self.detect_red_line(self.redline_image): #  0 -> 1 if detect_lane = true
+            self.mode = 1
+            self.counter_stop += 1
+            if self.counter_stop == 4 or self.counter_stop == 5:
+                self.apriltag = self.detect_tag()
+                if self.apriltag == "right":
+                    self.mode = 5
+                elif self.apriltag == "left":
+                    self.mode = 4
+
+
+        if (self.mode == 2 or self.mode == 4 or self.mode == 5) and self.counter_avoid_red < self.timer_avoid_redline: # 2 -> 2 still don't want to detect the red line
+            self.counter_avoid_red +=1
+
+        if self.mode == 2 and self.counter_avoid_red == self.timer_avoid_redline: # 2 - > 0 you can check if you see red line
+            self.counter_avoid_red = 0
+            self.mode = 0
+        
+        if self.mode == 3 and np.average(self.history_leader_duckiebot) < 15:
+            self.mode = 0
+        
+        
+        # deciding what to do based on the mode we are in
+        if self.mode == 0 or self.mode == 2:
+            self.move_pid()
+            self.x = (1.0, 1.0, 1.0, 1.0) # white
+
+        if self.mode == 1: 
+            self.stop()
+            self.x = (1.0, 1.0, 1.0, 1.0) # white
+        
+        if self.mode == 3:
+            self.x = (0.0, 1.0, 0.0, 1.0) # green
+            self.move_pid()
+
+        if self.mode == 4:
+            self.x = (1.0, 1.0, 1.0, 1.0) # white
+            self.turn_left()
+            
+        
+        if self.mode == 5:
+            self.x = (1.0, 1.0, 1.0, 1.0) # white
+            self.turn_right()
+
+        if self.x != self.prev_x :
+            self.publish_leds(self.x)
+
+        self.prev_x = self.x
+
+        pass
+
+if __name__ == '__main__':
+    # create the node
+    node = MotionNode(node_name='my_publisher_node')
+    
+    # run node
+    while node.gray is None:
+        rospy.sleep(1)
+
+    node.publish_leds(node.x)
+    
+    while not rospy.is_shutdown():
+        node.run()
+    # keep the process from terminating
+    rospy.spin()

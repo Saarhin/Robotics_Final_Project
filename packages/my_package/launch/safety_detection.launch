@@ -1,0 +1,9 @@
+<launch>
+
+  <group ns="$(arg veh)">
+
+    <node pkg="my_package" type="MY_NODE.py" name="MAY_NODE_NAME" output="screen"/>
+
+  </group>
+
+</launch>
