@@ -48,13 +48,14 @@ class MotionNode(DTROS):
         self.undisorted_image = None
         self.redline_image = None
         self.leader_duckiebot_image = None
+        self.leader_duckiebot_turn = None
         self.apriltag_image = None
         self.gray = None
 
         self.control_type = "PID"
         self.proportional_gain = 0.05
         self.derivative_gain = 0.03
-        self.integral_gain = 0.001
+        self.integral_gain = 0.0001
 
         #color detection
         self.white_lower = np.array([0, 0, 180], np.uint8) 
@@ -63,7 +64,7 @@ class MotionNode(DTROS):
         self.error = 0
         self.prev_error = 0
         self.history = np.zeros((1,10))
-        self.history_leader_duckiebot = np.zeros((1,30), dtype=float)
+        # self.history_leader_duckiebot = np.zeros((1,30), dtype=float)
         self.integral = 0
         self.calibration = -87
 
@@ -87,8 +88,8 @@ class MotionNode(DTROS):
         self.count_stops = 0
         self.predict_turn = "straight"
 
-        self.left_turn_dist = 2
-        self.right_turn_dist = 1
+        self.left_turn_dist = 1.3
+        self.right_turn_dist = 0.5
 
 
         #test
@@ -118,18 +119,23 @@ class MotionNode(DTROS):
         self.undisorted_image = self.image_preprocess(dst)
         self.redline_image = self.redline_image_process(self.undisorted_image)
         self.leader_duckiebot_image = self.leader_duckiebot_image_process(self.undisorted_image)
+        self.leader_duckiebot_turn = self.leader_duckiebot_turn_process(self.undisorted_image)
         self.apriltag_image = self.apriltag_image_process(self.undisorted_image)
         self.gray = self.calc_error(self.undisorted_image)
 
     def redline_image_process(self, img):
-        new_width = 200
-        new_height = 150
-        resized_image = cv2.resize(img, (new_width, new_height), interpolation = cv2.INTER_AREA)
+        h, w, _ = img.shape
+        resized_image = img[h//2:, w//4: -w//4, :]
         return resized_image
     
     def leader_duckiebot_image_process(self, img):
         h, w, _ = img.shape
-        resized_image = img[h//4: , w//4:-w//4, :]
+        resized_image = img[: , w//4:-w//4, :]
+        return resized_image
+    
+    def leader_duckiebot_turn_process(self, img):
+        h, w, _ = img.shape
+        resized_image = img[:-h//4 , :, :]
         return resized_image
     
     def apriltag_image_process(self, img):
@@ -217,6 +223,7 @@ class MotionNode(DTROS):
     def detect_red_line(self, image):
         if image is None:
             return
+        
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
         red_ranges = {'lower': np.array([0, 150, 50]), 'upper': np.array([10, 255, 255])}
@@ -227,17 +234,16 @@ class MotionNode(DTROS):
         
         if contours:
             largest_contour = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(largest_contour) > 900:
+            if cv2.contourArea(largest_contour) > 3000:
                 x, y, w, h = cv2.boundingRect(largest_contour)
                 
                 # Estimate distance based on contour position
                 image_height = image.shape[0]
                 distance = (image_height - (y + h)) / image_height
                 
-                
-                return True
+                return True, distance
                     
-        return False
+        return False, float("inf")
     
     def detect_leader_duckiebot(self, image):
         if image is None:
@@ -249,62 +255,107 @@ class MotionNode(DTROS):
         
 
         mask = cv2.inRange(hsv, black_ranges['lower'], black_ranges['upper'])
+
+       
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         
         if contours:
             largest_contour = max(contours, key=cv2.contourArea)
-            area = cv2.contourArea(largest_contour)
-            x, y, w, h = cv2.boundingRect(largest_contour)
-
-            return area, x+w//2
             
-
-
-        return 0.0, image.shape[1]//2
+            if cv2.contourArea(largest_contour) > 2:
+                x, y, w, h = cv2.boundingRect(largest_contour)
+                
+                # Estimate distance based on contour position
+                image_height = image.shape[0]
+                distance = (image_height - (y + h)) / image_height
+                middle = x+w//2
+                if middle < 75 and abs(middle - 75) > 30:
+                    return True , distance, "left"
+                if middle > 75 and abs(middle - 75) > 30:
+                    return True , distance, "right"
+                return True, distance,  "straigh"
+            
+        return False, float("inf"), "straight"
     
-    def detect_tag(self):
-        detector = aptag.Detector(families="tag36h11")
-        results = detector.detect(self.apriltag)
-        # rospy.loginfo(results)
-       
-           
-        def area(r):
-            # Use corners to compute polygon area
-            (ptA, ptB, ptC, ptD) = r.corners
-            return 0.5 * abs(
-                ptA[0]*ptB[1] + ptB[0]*ptC[1] + ptC[0]*ptD[1] + ptD[0]*ptA[1]
-                - ptB[0]*ptA[1] - ptC[0]*ptB[1] - ptD[0]*ptC[1] - ptA[0]*ptD[1]
-            )
-
-        largest_tag = max(results, key=area)
-
-        tag_id = str(largest_tag.tag_id)
-        if tag_id == 67:
-            return "right"
-        else:
-            return "left"
-    
-    def detect_crosswalk(self, image):
+    def detect_leader_duckiebot_turn(self, image):
         if image is None:
             return
         
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-        black_ranges = {'lower': np.array([110, 150, 100]), 'upper': np.array([120, 250, 200])}
+        black_ranges = {'lower': np.array([110, 80, 50]), 'upper': np.array([130, 255, 255])}
         
 
         mask = cv2.inRange(hsv, black_ranges['lower'], black_ranges['upper'])
+
+        # image_msg = self._bridge.cv2_to_imgmsg(mask, encoding="8UC1")
+        # self.pub_lane.publish(image_msg)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         
         if contours:
             largest_contour = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(largest_contour) > 500:
+            
+            if cv2.contourArea(largest_contour) > 2:
+                x, y, w, h = cv2.boundingRect(largest_contour)
                 
-                return True
+                # Estimate distance based on contour position
+                image_height = image.shape[0]
+                distance = (image_height - (y + h)) / image_height
+                middle = x+w//2
+                rospy.loginfo(middle)
+                if middle < image.shape[1]//2 and abs(middle - image.shape[1]//2) > 30:
+                    return True , distance, "left"
+                if middle > image.shape[1]//2 and abs(middle - image.shape[1]//2) > 30:
+                    return True , distance, "right"
+                return True, distance,  "straigh"
+            
+        return False, float("inf"), "straight"
+            
+    
+    # def detect_tag(self):
+    #     detector = aptag.Detector(families="tag36h11")
+    #     results = detector.detect(self.apriltag)
+    #     # rospy.loginfo(results)
+       
+           
+    #     def area(r):
+    #         # Use corners to compute polygon area
+    #         (ptA, ptB, ptC, ptD) = r.corners
+    #         return 0.5 * abs(
+    #             ptA[0]*ptB[1] + ptB[0]*ptC[1] + ptC[0]*ptD[1] + ptD[0]*ptA[1]
+    #             - ptB[0]*ptA[1] - ptC[0]*ptB[1] - ptD[0]*ptC[1] - ptA[0]*ptD[1]
+    #         )
+
+    #     largest_tag = max(results, key=area)
+
+    #     tag_id = str(largest_tag.tag_id)
+    #     if tag_id == 67:
+    #         return "right"
+    #     else:
+    #         return "left"
+    
+    # def detect_crosswalk(self, image):
+    #     if image is None:
+    #         return
+        
+    #     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+    #     black_ranges = {'lower': np.array([110, 150, 100]), 'upper': np.array([120, 250, 200])}
+        
+
+    #     mask = cv2.inRange(hsv, black_ranges['lower'], black_ranges['upper'])
+    #     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        
+    #     if contours:
+    #         largest_contour = max(contours, key=cv2.contourArea)
+    #         if cv2.contourArea(largest_contour) > 500:
+                
+    #             return True
                     
-        return False
+    #     return False
     
     def publish_leds(self, x):      
         if self.gray is not None:
@@ -320,34 +371,29 @@ class MotionNode(DTROS):
             self.led_pub.publish(msg) 
         pass
 
-    def detect_ducks(self, image):
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        duck_ranges = {'lower': np.array([9, 91, 163]), 'upper': np.array([22, 255, 255])}
+    # def detect_ducks(self, image):
+    #     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    #     duck_ranges = {'lower': np.array([9, 91, 163]), 'upper': np.array([22, 255, 255])}
     
-        mask = cv2.inRange(hsv, duck_ranges['lower'], duck_ranges['upper'])
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    #     mask = cv2.inRange(hsv, duck_ranges['lower'], duck_ranges['upper'])
+    #     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        if contours:
-            largest_contour = max(contours, key=cv2.contourArea)
-            return cv2.contourArea(largest_contour) > 500
+    #     if contours:
+    #         largest_contour = max(contours, key=cv2.contourArea)
+    #         return cv2.contourArea(largest_contour) > 500
                   
-
-    def predict_leader_turn(self, middle):
-        if middle < 75 and math.abs(middle - 75) > 30:
-            return "left"
-        if middle > 75 and math.abs(middle - 75) > 30:
-            return "right"
-        return "straight"
     
     def turn_left(self):
         distance_traveled = 0
         dt = 0.1
 
         while distance_traveled < self.left_turn_dist:
-            self.publish_twisted(v=self._v, omega = 2)
+            self.publish_twisted(v=self._v, omega = 1)
             self.calc_error(self.undisorted_image)
             self.rate.sleep()
             distance_traveled += self._v * dt 
+
+        self.predict_turn = "straight"
 
     def turn_right(self):
         distance_traveled = 0
@@ -357,49 +403,63 @@ class MotionNode(DTROS):
             self.publish_twisted(v=self._v, omega = -3)
             self.calc_error(self.undisorted_image)
             self.rate.sleep()
-            distance_traveled += self._v * dt     
+            distance_traveled += self._v * dt 
+
+        self.predict_turn = "straight"  
 
     def run(self):
         
-
         self.rate.sleep()
-        rospy.loginfo(self.predict_turn)
+        leader_see, leader_distance, _ = self.detect_leader_duckiebot(self.leader_duckiebot_image)
 
-        leader_size, leader_middle = self.detect_leader_duckiebot(self.leader_duckiebot_image)
-
-        self.history_leader_duckiebot = np.roll(self.history_leader_duckiebot, shift=-1, axis=1)  # Shift all values left
-        self.history_leader_duckiebot[0, -1] = leader_size
-
-        self.predict_turn = self.predict_leader_turn(leader_middle)
 
         # checking if we should change the mode based on the info we are getting
-        if self.mode == 4 or self.mode == 5:
+        if self.mode == 5 or self.mode == 6:
             self.mode == 0
+        if self.mode == 4 and not leader_see:
+            self.mode = 0
+            
+        if self.mode == 4 and leader_distance >= 0.6:
+            self.mode = 3
+
+        if leader_see and leader_distance >= 0.6:
+            self.mode = 3
+
+        if leader_see and leader_distance < 0.6:
+            self.mode = 4
 
         if self.mode == 1 and self.counter_stop < self.timer_stop: # 1 -> 1 stop for some time before the red line
             self.counter_stop += 1
+            _, _, self.predict_turn = self.detect_leader_duckiebot_turn(self.leader_duckiebot_turn)
+            
 
         if self.mode == 1 and self.counter_stop == self.timer_stop: # 1 -> 2 start moving without detecting the red line  
+            # rospy.loginfo("Hi")
+            rospy.loginfo(self.predict_turn )
             if self.predict_turn == "straight":
                 self.mode = 2
+                rospy.loginfo("straight")
             elif self.predict_turn == "left":
-                self.mode = 4
-            elif self.predict_turn == "right":
                 self.mode = 5
+                rospy.loginfo("left")
+            elif self.predict_turn == "right":
+                self.mode = 6
+                rospy.loginfo("right")
+
             self.counter_stop = 0
 
-        if self.mode == 0 and np.average(self.history_leader_duckiebot) >=15: # 0 -> 3 if see the leader duckiebot
-            self.mode = 3
+        # if self.mode == 0 and np.average(self.history_leader_duckiebot) >=10: # 0 -> 3 if see the leader duckiebot
+        #     self.mode = 3
 
-        if (self.mode == 0 or self.mode == 3) and self.detect_red_line(self.redline_image): #  0 -> 1 if detect_lane = true
+        if (self.mode == 0 or self.mode == 3) and self.detect_red_line(self.redline_image)[0]: #  0 -> 1 if detect_lane = true
             self.mode = 1
-            self.counter_stop += 1
-            if self.counter_stop == 4 or self.counter_stop == 5:
-                self.apriltag = self.detect_tag()
-                if self.apriltag == "right":
-                    self.mode = 5
-                elif self.apriltag == "left":
-                    self.mode = 4
+            # self.counter_stop += 1
+            # if self.counter_stop == 4 or self.counter_stop == 5:
+            #     self.apriltag = self.detect_tag()
+            #     if self.apriltag == "right":
+            #         self.mode = 5
+            #     elif self.apriltag == "left":
+            #         self.mode = 4
 
 
         if (self.mode == 2 or self.mode == 4 or self.mode == 5) and self.counter_avoid_red < self.timer_avoid_redline: # 2 -> 2 still don't want to detect the red line
@@ -409,8 +469,8 @@ class MotionNode(DTROS):
             self.counter_avoid_red = 0
             self.mode = 0
         
-        if self.mode == 3 and np.average(self.history_leader_duckiebot) < 15:
-            self.mode = 0
+        # if self.mode == 3 and np.average(self.history_leader_duckiebot) < 10:
+        #     self.mode = 0
         
         
         # deciding what to do based on the mode we are in
@@ -423,15 +483,19 @@ class MotionNode(DTROS):
             self.x = (1.0, 1.0, 1.0, 1.0) # white
         
         if self.mode == 3:
-            self.x = (0.0, 1.0, 0.0, 1.0) # green
+            self.x = (0.0, 0.0, 1.0, 1.0) # green
             self.move_pid()
 
         if self.mode == 4:
+            self.x = (1.0, 0.0, 1.0, 1.0) # green
+            self.stop()
+
+        if self.mode == 5:
             self.x = (1.0, 1.0, 1.0, 1.0) # white
             self.turn_left()
             
         
-        if self.mode == 5:
+        if self.mode == 6:
             self.x = (1.0, 1.0, 1.0, 1.0) # white
             self.turn_right()
 
@@ -440,19 +504,23 @@ class MotionNode(DTROS):
 
         self.prev_x = self.x
 
+
         pass
 
 if __name__ == '__main__':
     # create the node
     node = MotionNode(node_name='my_publisher_node')
+
+    rate = rospy.Rate(10)
     
     # run node
     while node.gray is None:
-        rospy.sleep(1)
+        rate.sleep()
 
     node.publish_leds(node.x)
     
     while not rospy.is_shutdown():
         node.run()
+        rate.sleep()
     # keep the process from terminating
     rospy.spin()
