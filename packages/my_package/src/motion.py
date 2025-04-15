@@ -91,6 +91,9 @@ class MotionNode(DTROS):
         self.left_turn_dist = 2
         self.right_turn_dist = 0.5
         self.straight_turn_dist = 2
+        self.when_to_detect_tag = 5
+
+        self.tag_id = 0
 
 
         #test
@@ -123,6 +126,8 @@ class MotionNode(DTROS):
         self.leader_duckiebot_turn = self.leader_duckiebot_turn_process(self.undisorted_image)
         self.apriltag_image = self.apriltag_image_process(self.undisorted_image)
         self.gray = self.calc_error(self.undisorted_image)
+        # image_msg = self._bridge.cv2_to_imgmsg(self.apriltag_image, encoding="8UC1")
+        # self.pub_lane.publish(image_msg)
 
     def redline_image_process(self, img):
         h, w, _ = img.shape
@@ -141,8 +146,10 @@ class MotionNode(DTROS):
     
     def apriltag_image_process(self, img):
         h, w, _ = img.shape
-        resized_image = img[h//4: , w//4:, :]
-        return resized_image
+        resized_image = img[: , w//4:, :]
+
+        image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
+        return image
 
 
     def image_preprocess(self, img):
@@ -292,9 +299,6 @@ class MotionNode(DTROS):
 
         mask = cv2.inRange(hsv, black_ranges['lower'], black_ranges['upper'])
 
-        image_msg = self._bridge.cv2_to_imgmsg(mask, encoding="8UC1")
-        self.pub_lane.publish(image_msg)
-
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         
@@ -317,27 +321,28 @@ class MotionNode(DTROS):
         return False, float("inf"), "straight"
             
     
-    # def detect_tag(self):
-    #     detector = aptag.Detector(families="tag36h11")
-    #     results = detector.detect(self.apriltag)
-    #     # rospy.loginfo(results)
+    def detect_tag(self):
+        detector = aptag.Detector(families="tag36h11")
+        results = detector.detect(self.apriltag_image)
+
+        while not results:
+            results = detector.detect(self.apriltag_image)
+
+        
        
            
-    #     def area(r):
-    #         # Use corners to compute polygon area
-    #         (ptA, ptB, ptC, ptD) = r.corners
-    #         return 0.5 * abs(
-    #             ptA[0]*ptB[1] + ptB[0]*ptC[1] + ptC[0]*ptD[1] + ptD[0]*ptA[1]
-    #             - ptB[0]*ptA[1] - ptC[0]*ptB[1] - ptD[0]*ptC[1] - ptA[0]*ptD[1]
-    #         )
+        def area(r):
+            # Use corners to compute polygon area
+            (ptA, ptB, ptC, ptD) = r.corners
+            return 0.5 * abs(
+                ptA[0]*ptB[1] + ptB[0]*ptC[1] + ptC[0]*ptD[1] + ptD[0]*ptA[1]
+                - ptB[0]*ptA[1] - ptC[0]*ptB[1] - ptD[0]*ptC[1] - ptA[0]*ptD[1]
+            )
 
-    #     largest_tag = max(results, key=area)
+        largest_tag = max(results, key=area)
 
-    #     tag_id = str(largest_tag.tag_id)
-    #     if tag_id == 67:
-    #         return "right"
-    #     else:
-    #         return "left"
+        tag_id = str(largest_tag.tag_id)
+        return tag_id
     
     # def detect_crosswalk(self, image):
     #     if image is None:
@@ -402,7 +407,7 @@ class MotionNode(DTROS):
         distance_traveled = 0
         dt = 0.1
 
-        while distance_traveled < self.left_turn_dist:
+        while distance_traveled < self.straight_turn_dist:
             self.publish_twisted(v=self._v, omega = 0)
             self.calc_error(self.undisorted_image)
             self.rate.sleep()
@@ -416,7 +421,7 @@ class MotionNode(DTROS):
         dt = 0.1
 
         while distance_traveled < self.right_turn_dist:
-            self.publish_twisted(v=self._v, omega = -3)
+            self.publish_twisted(v=self._v, omega = -2.5)
             self.calc_error(self.undisorted_image)
             self.rate.sleep()
             distance_traveled += self._v * dt 
@@ -431,6 +436,9 @@ class MotionNode(DTROS):
 
 
         # checking if we should change the mode based on the info we are getting
+        if self.mode == 8:
+            self.mode = 9
+
         if self.mode == 5 or self.mode == 6 or self.mode == 7:
             self.mode = 0
             rospy.loginfo("mode changed to 0")
@@ -454,22 +462,31 @@ class MotionNode(DTROS):
 
         if self.mode == 1 and self.counter_stop == self.timer_stop: # 1 -> 2 start moving without detecting the red line  
             rospy.loginfo(self.predict_turn )
-            if self.predict_turn == "straight":
-                self.mode = 7
-                rospy.loginfo("straight")
-            elif self.predict_turn == "left":
-                self.mode = 5
-                rospy.loginfo("left")
-            elif self.predict_turn == "right":
-                self.mode = 6
-                rospy.loginfo("right")
+            self.when_to_detect_tag += 1
+            if self.when_to_detect_tag < 4 :
+                if self.predict_turn == "straight":
+                    self.mode = 7
+                    rospy.loginfo("straight")
+                elif self.predict_turn == "left":
+                    self.mode = 5
+                    rospy.loginfo("left")
+                elif self.predict_turn == "right":
+                    self.mode = 6
+                    rospy.loginfo("right")
 
             self.counter_stop = 0
+            
+        
+        if self.mode == 1 and  (self.when_to_detect_tag == 4 or self.when_to_detect_tag == 5):
+            self.tag_id = self.detect_tag()
+            self.mode = 8
+            
+
 
         # if self.mode == 0 and np.average(self.history_leader_duckiebot) >=10: # 0 -> 3 if see the leader duckiebot
         #     self.mode = 3
 
-        if (self.mode == 0 or self.mode == 3 or self.mode == 4) and self.detect_red_line(self.redline_image)[0]: #  0 -> 1 if detect_lane = true
+        if (self.mode == 0 or self.mode == 3 or self.mode == 4 or self.mode == 9) and self.detect_red_line(self.redline_image)[0]: #  0 -> 1 if detect_lane = true
             self.mode = 1
             # self.counter_stop += 1
             # if self.counter_stop == 4 or self.counter_stop == 5:
@@ -492,6 +509,7 @@ class MotionNode(DTROS):
         
         
         # deciding what to do based on the mode we are in
+        
         if self.mode == 0 or self.mode == 2:
             self.move_pid()
             self.x = (1.0, 1.0, 1.0, 1.0) # white
@@ -519,6 +537,20 @@ class MotionNode(DTROS):
         if self.mode == 7:
             self.x = (1.0, 1.0, 1.0, 1.0) # white
             self.go_straight()
+
+        if self.mode == 8:
+            rospy.loginfo("hi")
+            if int(self.tag_id) == 48:
+                rospy.loginfo("turn_right")
+                self.turn_right()
+            elif int(self.tag_id) == 50:
+                rospy.loginfo("turn_left")
+                self.turn_left()
+
+        if self.mode == 9:
+            self.move_pid()
+            self.x = (1.0, 1.0, 1.0, 1.0) # white
+
 
         if self.x != self.prev_x :
             self.publish_leds(self.x)
