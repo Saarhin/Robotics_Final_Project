@@ -50,6 +50,7 @@ class MotionNode(DTROS):
         self.leader_duckiebot_image = None
         self.leader_duckiebot_turn = None
         self.apriltag_image = None
+        self.crosswalk_image = None
         self.gray = None
 
         self.control_type = "PID"
@@ -78,7 +79,7 @@ class MotionNode(DTROS):
         self.prev_x = (1.0, 1.0, 1.0, 1.0)
         self.x = (1.0, 1.0, 1.0, 1.0)
 
-        self.mode = 0
+        self.mode = 9
 
         # mode = 0  ->  pid_control
         # mode = 1  ->  stop for red line
@@ -94,6 +95,10 @@ class MotionNode(DTROS):
         self.when_to_detect_tag = 5
 
         self.tag_id = 0
+
+        self.stop_before_crosswalk = 0
+        self.timer_avoid_crosswalk = 60
+        self.timer_stop_crosswalk = 10
 
 
         #test
@@ -124,9 +129,10 @@ class MotionNode(DTROS):
         self.redline_image = self.redline_image_process(self.undisorted_image)
         self.leader_duckiebot_image = self.leader_duckiebot_image_process(self.undisorted_image)
         self.leader_duckiebot_turn = self.leader_duckiebot_turn_process(self.undisorted_image)
+        self.crosswalk_image = self.crosswalk_image_process(self.undisorted_image)
         self.apriltag_image = self.apriltag_image_process(self.undisorted_image)
         self.gray = self.calc_error(self.undisorted_image)
-        # image_msg = self._bridge.cv2_to_imgmsg(self.apriltag_image, encoding="8UC1")
+        # image_msg = self._bridge.cv2_to_imgmsg(self.crosswalk_image, encoding="rgb8")
         # self.pub_lane.publish(image_msg)
 
     def redline_image_process(self, img):
@@ -151,6 +157,10 @@ class MotionNode(DTROS):
         image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
         return image
 
+    def crosswalk_image_process(self, img):
+        h, w, _ = img.shape
+        resized_image = img[h//4: , w//5:-w//5, :]
+        return resized_image
 
     def image_preprocess(self, img):
 
@@ -344,26 +354,29 @@ class MotionNode(DTROS):
         tag_id = str(largest_tag.tag_id)
         return tag_id
     
-    # def detect_crosswalk(self, image):
-    #     if image is None:
-    #         return
+    def detect_crosswalk(self, image):
+        if image is None:
+            return
         
-    #     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-    #     black_ranges = {'lower': np.array([110, 150, 100]), 'upper': np.array([120, 250, 200])}
+        black_ranges = {'lower': np.array([110, 150, 100]), 'upper': np.array([120, 250, 200])}
         
 
-    #     mask = cv2.inRange(hsv, black_ranges['lower'], black_ranges['upper'])
-    #     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        mask = cv2.inRange(hsv, black_ranges['lower'], black_ranges['upper'])
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        image_msg = self._bridge.cv2_to_imgmsg(mask, encoding="8UC1")
+        self.pub_lane.publish(image_msg)
         
         
-    #     if contours:
-    #         largest_contour = max(contours, key=cv2.contourArea)
-    #         if cv2.contourArea(largest_contour) > 500:
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(largest_contour) > 400:
                 
-    #             return True
+                return True
                     
-    #     return False
+        return False
     
     def publish_leds(self, x):      
         if self.gray is not None:
@@ -379,16 +392,18 @@ class MotionNode(DTROS):
             self.led_pub.publish(msg) 
         pass
 
-    # def detect_ducks(self, image):
-    #     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    #     duck_ranges = {'lower': np.array([9, 91, 163]), 'upper': np.array([22, 255, 255])}
+    def detect_ducks(self, image):
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        duck_ranges = {'lower': np.array([9, 91, 163]), 'upper': np.array([22, 255, 255])}
     
-    #     mask = cv2.inRange(hsv, duck_ranges['lower'], duck_ranges['upper'])
-    #     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        mask = cv2.inRange(hsv, duck_ranges['lower'], duck_ranges['upper'])
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-    #     if contours:
-    #         largest_contour = max(contours, key=cv2.contourArea)
-    #         return cv2.contourArea(largest_contour) > 500
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+            return cv2.contourArea(largest_contour) > 500
+        
+        return False
                   
     
     def turn_left(self):
@@ -432,10 +447,34 @@ class MotionNode(DTROS):
     def run(self):
         
         self.rate.sleep()
-        leader_see, leader_distance, _ = self.detect_leader_duckiebot(self.leader_duckiebot_image)
+        if self.mode < 9:
+            leader_see, leader_distance, _ = self.detect_leader_duckiebot(self.leader_duckiebot_image)
+        else:
+            leader_see = False
+            leader_distance = float("inf")
 
 
         # checking if we should change the mode based on the info we are getting
+        if self.mode == 11 and self.stop_before_crosswalk < self.timer_avoid_crosswalk:
+            self.stop_before_crosswalk +=1
+        
+        if self.mode == 11 and self.stop_before_crosswalk == self.timer_avoid_crosswalk:
+            self.mode = 9
+            self.stop_before_crosswalk = 0
+        
+        if self.mode == 10: 
+            if  self.stop_before_crosswalk < self.timer_stop_crosswalk and not self.detect_ducks(self.crosswalk_image):
+                self.stop_before_crosswalk +=1
+
+        if self.mode == 10 and self.stop_before_crosswalk == self.timer_stop_crosswalk:
+            self.mode = 11
+            self.stop_before_crosswalk = 0
+        
+        if self.mode == 9 and self.detect_crosswalk(self.crosswalk_image):
+            self.mode = 10
+            self.stop_before_crosswalk = 0
+
+           
         if self.mode == 8:
             self.mode = 9
 
@@ -547,9 +586,14 @@ class MotionNode(DTROS):
                 rospy.loginfo("turn_left")
                 self.turn_left()
 
-        if self.mode == 9:
+        if self.mode == 9 or self.mode == 11:
             self.move_pid()
             self.x = (1.0, 1.0, 1.0, 1.0) # white
+
+        if self.mode == 10:
+            self.stop()
+            self.x = (1.0, 1.0, 0.0, 1.0) # white
+
 
 
         if self.x != self.prev_x :
