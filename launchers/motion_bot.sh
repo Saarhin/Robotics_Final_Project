@@ -6,7 +6,7 @@ source /environment.sh
 dt-launchfile-init
 
 # launch subscriber
-rosrun my_package motion.py
+rosrun my_package motion_bot.py
 
 # wait for app to end
 dt-launchfile-join
