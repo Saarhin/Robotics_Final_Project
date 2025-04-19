@@ -77,13 +77,15 @@ class MotionNode(DTROS):
 
         self.timer_avoid_redline = 30
         self.timer_stop = 10
+        self.timer_stop_for_broken = 5
         self.counter_avoid_red = 0
         self.counter_stop = 0
+        self.count_stop_for_broken = 0
 
-        self.prev_x = (0.0, 1.0, 0.0, 1.0)
-        self.x = (0.0, 1.0, 0.0, 1.0)
+        self.prev_x = (0.0, 1.0, 0.0, 0.3)
+        self.x = (0.0, 1.0, 0.0, 0.3)
 
-        self.mode = 0
+        self.mode = 9
 
         # mode = 0  ->  pid_control
         # mode = 1  ->  stop for red line
@@ -96,16 +98,19 @@ class MotionNode(DTROS):
         self.left_turn_dist = 1
         self.right_turn_dist = 0.5
         self.straight_turn_dist = 0.8
-        self.when_to_detect_tag = 0
+        self.when_to_detect_tag = 6
 
         self.tag_id = 0
 
         self.stop_before_crosswalk = 0
-        self.timer_avoid_crosswalk = 60
+        self.timer_avoid_crosswalk = 20
         self.timer_stop_crosswalk = 10
 
-        self.counter_yellow_line = 0
-        self.timer_yellow_line = 50
+        self.counter_yellow_line_left = 0
+        self.timer_yellow_line_left = 10
+
+        self.counter_yellow_line_right = 0
+        self.timer_yellow_line_right = 15
 
 
         #test
@@ -122,48 +127,48 @@ class MotionNode(DTROS):
         self.blobdetector_min_dist_between_blobs = 1
 
 
-        self.cbParametersChanged() 
+        # self.cbParametersChanged() 
 
 
-    def cbParametersChanged(self):
+    # def cbParametersChanged(self):
 
-        self.publish_duration = rospy.Duration.from_sec(1.0 / self.process_frequency)
-        params = cv2.SimpleBlobDetector_Params()
-        params.minArea = self.blobdetector_min_area
-        params.minDistBetweenBlobs = self.blobdetector_min_dist_between_blobs
-        self.simple_blob_detector = cv2.SimpleBlobDetector_create(params)
+    #     self.publish_duration = rospy.Duration.from_sec(1.0 / self.process_frequency)
+    #     params = cv2.SimpleBlobDetector_Params()
+    #     params.minArea = self.blobdetector_min_area
+    #     params.minDistBetweenBlobs = self.blobdetector_min_dist_between_blobs
+    #     self.simple_blob_detector = cv2.SimpleBlobDetector_create(params)
 
-    def detect_bot(self, image_cv):
-        """
-        Callback for processing a image which potentially contains a back pattern. Processes the image only if
-        sufficient time has passed since processing the previous image (relative to the chosen processing frequency).
+    # def detect_bot(self, image_cv):
+    #     """
+    #     Callback for processing a image which potentially contains a back pattern. Processes the image only if
+    #     sufficient time has passed since processing the previous image (relative to the chosen processing frequency).
 
-        The pattern detection is performed using OpenCV's `findCirclesGrid <https://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html?highlight=solvepnp#findcirclesgrid>`_ function.
+    #     The pattern detection is performed using OpenCV's `findCirclesGrid <https://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html?highlight=solvepnp#findcirclesgrid>`_ function.
 
-        Args:
-            image_msg (:obj:`sensor_msgs.msg.CompressedImage`): Input image
+    #     Args:
+    #         image_msg (:obj:`sensor_msgs.msg.CompressedImage`): Input image
 
-        """
-        now = rospy.Time.now()
-        if now - self.last_stamp < self.publish_duration:
-            return False, 150
-        else:
-            self.last_stamp = now
+    #     """
+    #     now = rospy.Time.now()
+    #     if now - self.last_stamp < self.publish_duration:
+    #         return False, 150
+    #     else:
+    #         self.last_stamp = now
 
-        (detection, centers) = cv2.findCirclesGrid(
-            image_cv,
-            patternSize=tuple(self.circlepattern_dims),
-            flags=cv2.CALIB_CB_SYMMETRIC_GRID,
-            blobDetector=self.simple_blob_detector,
-        )
+    #     (detection, centers) = cv2.findCirclesGrid(
+    #         image_cv,
+    #         patternSize=tuple(self.circlepattern_dims),
+    #         flags=cv2.CALIB_CB_SYMMETRIC_GRID,
+    #         blobDetector=self.simple_blob_detector,
+    #     )
 
         
-        if detection > 0:
-            max_x = np.max(centers[:, 0, 0])  # max x-coordinate
-            min_x = np.min(centers[:, 0, 0])  # min x-coordinate
+    #     if detection > 0:
+    #         max_x = np.max(centers[:, 0, 0])  # max x-coordinate
+    #         min_x = np.min(centers[:, 0, 0])  # min x-coordinate
 
-            return True, (max_x + min_x)/2 
-        return False, 150
+    #         return True, (max_x + min_x)/2 
+    #     return False, 150
 
 
     def callback_info(self, msg):
@@ -192,8 +197,8 @@ class MotionNode(DTROS):
         self.crosswalk_image = self.crosswalk_image_process(self.undisorted_image)
         self.apriltag_image = self.apriltag_image_process(self.undisorted_image)
         self.gray = self.calc_error(self.undisorted_image)
-        # image_msg = self._bridge.cv2_to_imgmsg(self.crosswalk_image, encoding="rgb8")
-        # self.pub_lane.publish(image_msg)
+        image_msg = self._bridge.cv2_to_imgmsg(self.apriltag_image, encoding="8UC1")
+        self.pub_lane.publish(image_msg)
 
     def redline_image_process(self, img):
         h, w, _ = img.shape
@@ -227,8 +232,7 @@ class MotionNode(DTROS):
         new_width = 400
         new_height = 300
         resized_image = cv2.resize(img, (new_width, new_height), interpolation = cv2.INTER_AREA)
-        blurred_image = cv2.blur(resized_image, (5, 5)) 
-        return blurred_image
+        return resized_image
     
     def calc_error(self, imageFrame):
 
@@ -242,7 +246,7 @@ class MotionNode(DTROS):
 
         hsvFrame = cv2.cvtColor(imageFrame, cv2.COLOR_BGR2HSV)
 
-        if self.mode == 13:
+        if self.mode == 14 or self.mode == 15:
             yellow_mask = cv2.inRange(hsvFrame, self.yellow_lower, self.yellow_upper) 
 
             yellow_mask = cv2.dilate(yellow_mask, kernel) 
@@ -309,7 +313,7 @@ class MotionNode(DTROS):
 
     def on_shutdown(self):
         self.publish_twisted(v = 0, omega = 0)
-        self.publish_leds((0.0, 1.0, 0.0, 1.0))
+        self.publish_leds((0.0, 1.0, 0.0, 0.3))
 
     def detect_red_line(self, image):
         if image is None:
@@ -347,9 +351,7 @@ class MotionNode(DTROS):
 
         mask = cv2.inRange(hsv, black_ranges['lower'], black_ranges['upper'])
 
-        # image_msg = self._bridge.cv2_to_imgmsg(mask, encoding="8UC1")
-        # self.pub_lane.publish(image_msg)
-
+        
        
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
@@ -410,24 +412,22 @@ class MotionNode(DTROS):
         detector = aptag.Detector(families="tag36h11")
         results = detector.detect(self.apriltag_image)
 
-        while not results:
-            results = detector.detect(self.apriltag_image)
+        if results:
 
-        
-       
-           
-        def area(r):
-            # Use corners to compute polygon area
-            (ptA, ptB, ptC, ptD) = r.corners
-            return 0.5 * abs(
-                ptA[0]*ptB[1] + ptB[0]*ptC[1] + ptC[0]*ptD[1] + ptD[0]*ptA[1]
-                - ptB[0]*ptA[1] - ptC[0]*ptB[1] - ptD[0]*ptC[1] - ptA[0]*ptD[1]
-            )
+            def area(r):
+                # Use corners to compute polygon area
+                (ptA, ptB, ptC, ptD) = r.corners
+                return 0.5 * abs(
+                    ptA[0]*ptB[1] + ptB[0]*ptC[1] + ptC[0]*ptD[1] + ptD[0]*ptA[1]
+                    - ptB[0]*ptA[1] - ptC[0]*ptB[1] - ptD[0]*ptC[1] - ptA[0]*ptD[1]
+                )
 
-        largest_tag = max(results, key=area)
+            largest_tag = max(results, key=area)
 
-        tag_id = str(largest_tag.tag_id)
-        return tag_id
+            tag_id = str(largest_tag.tag_id)
+            return tag_id
+        else:
+            return None
     
     def detect_crosswalk(self, image):
         if image is None:
@@ -444,7 +444,7 @@ class MotionNode(DTROS):
         
         if contours:
             largest_contour = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(largest_contour) > 400:
+            if cv2.contourArea(largest_contour) > 200:
                 
                 return True
                     
@@ -554,11 +554,20 @@ class MotionNode(DTROS):
 
     def run(self):
 
-        
-        self._v = 0.5
         self.rate.sleep()
+
+        if self.when_to_detect_tag < 4:
+            self._v = 0.5
+        else:
+            self._v = 0.4
+
+        if self.when_to_detect_tag == 3 or self.when_to_detect_tag == 4:
+            temp_tag = self.detect_tag()
+            if temp_tag:
+                self.tag_id = temp_tag
+        
         red_line_detected, red_line_distance = self.detect_red_line(self.redline_image)
-        if self.mode < 9:
+        if self.mode < 9 or self.mode == 12 or self.mode == 14:
             leader_see, leader_distance, temp_dir = self.detect_leader_duckiebot(self.leader_duckiebot_turn)
             if leader_see:
                 self.predict_turn = temp_dir
@@ -582,41 +591,75 @@ class MotionNode(DTROS):
        
 
         # checking if we should change the mode based on the info we are getting
-        # if self.mode == 14:
-        #     self.mode = 9
-        # if self.mode == 13 and self.counter_yellow_line == self.timer_yellow_line:
-        #     self.mode = 14
+        if self.mode == 18 and red_line_distance < 0.6:
+            self.mode = 19
 
+        if self.mode == 17: 
+            if  self.stop_before_crosswalk < self.timer_stop_crosswalk and not self.detect_ducks(self.crosswalk_image):
+                self.stop_before_crosswalk +=1
 
-        # if self.mode == 13 and self.counter_yellow_line < self.timer_yellow_line:
-        #     self.counter_yellow_line += 1
+        if self.mode == 17 and self.stop_before_crosswalk == self.timer_stop_crosswalk:
+            self.mode = 18
+            self.stop_before_crosswalk = 0
 
-        # if self.mode == 12 and self.detect_broken_duckiebot(self.leader_duckiebot_image)[1] < 0.7:
-        #     self.mode = 13
-        #     self.counter_yellow_line = 0
+        if self.mode == 16  and self.detect_crosswalk(self.crosswalk_image):
+            self.mode = 17
+            self.stop_before_crosswalk = 0
 
-        # if self.mode == 11 and self.stop_before_crosswalk < self.timer_avoid_crosswalk:
-        #     self.stop_before_crosswalk +=1
+        if self.mode == 15 and self.counter_yellow_line_left == self.timer_yellow_line_left:
+            self.counter_yellow_line_left = 0 
+            self.calibration *= -1
+            self.mode = 16
+
+        if self.mode == 15 and self.counter_yellow_line_left < self.timer_yellow_line_left:
+            self.counter_yellow_line_left +=1
+
+        if self.mode == 14 and self.counter_yellow_line_right == self.timer_yellow_line_right:
+            self.calibration *= -1
+            self.mode = 15
+            self.counter_yellow_line_left = 0
         
-        # if self.mode == 11 and self.stop_before_crosswalk == self.timer_avoid_crosswalk:
-        #     self.mode = 12
-        #     self.stop_before_crosswalk = 0
-        
-        # if self.mode == 10: 
-        #     if  self.stop_before_crosswalk < self.timer_stop_crosswalk and not self.detect_ducks(self.crosswalk_image):
-        #         self.stop_before_crosswalk +=1
 
-        # if self.mode == 10 and self.stop_before_crosswalk == self.timer_stop_crosswalk:
-        #     self.mode = 11
-        #     self.stop_before_crosswalk = 0
+        if self.mode == 14 and self.counter_yellow_line_right < self.timer_yellow_line_right:
+            self.counter_yellow_line_right +=1
+
+        if self.mode == 13 and self.count_stop_for_broken == self.timer_stop_for_broken:
+            self.mode = 14
+            self.count_stop_for_broken = 0
+            self.counter_yellow_line_right = 0
+            
+
+        if self.mode == 13 and self.count_stop_for_broken < self.timer_stop_for_broken:
+            self.count_stop_for_broken += 1
+
+        if self.mode == 12 and leader_distance < 0.55:
+            self.mode = 13
+            self.count_stop_for_broken = 0
+
+        if self.mode == 11 and self.stop_before_crosswalk < self.timer_avoid_crosswalk:
+            self.stop_before_crosswalk +=1
         
-        # if self.mode == 9 and self.detect_crosswalk(self.crosswalk_image):
-        #     self.mode = 10
-        #     self.stop_before_crosswalk = 0
+        if self.mode == 11 and self.stop_before_crosswalk == self.timer_avoid_crosswalk:
+            self.mode = 12
+            self.stop_before_crosswalk = 0
+            
+        
+        if self.mode == 10: 
+            if  self.stop_before_crosswalk < self.timer_stop_crosswalk and not self.detect_ducks(self.crosswalk_image):
+                self.stop_before_crosswalk +=1
+
+        if self.mode == 10 and self.stop_before_crosswalk == self.timer_stop_crosswalk:
+            self.mode = 11
+            self.stop_before_crosswalk = 0
+            
+        
+        if self.mode == 9  and self.detect_crosswalk(self.crosswalk_image):
+            self.mode = 10
+            self.stop_before_crosswalk = 0
 
            
-        # if self.mode == 8:
-        #     self.mode = 9
+        if self.mode == 8:
+            self.mode = 9
 
         if self.mode == 5 or self.mode == 6 or self.mode == 7:
             self.mode = 0
@@ -625,16 +668,15 @@ class MotionNode(DTROS):
             self.mode = 0
             
 
-        if self.mode != 1 and leader_see and leader_distance >= 0.3 and leader_see and leader_distance <= 0.6:
+        if self.mode != 1 and self.mode < 12 and leader_see and leader_distance >= 0.3 and leader_see and leader_distance <= 0.6:
             self.mode = 3
 
-        if self.mode != 1 and leader_see and leader_distance < 0.3:
+        if self.mode != 1 and self.mode < 12  and leader_see and leader_distance < 0.3:
             self.mode = 4
 
        
         if self.mode == 1 and self.counter_stop < self.timer_stop: # 1 -> 1 stop for some time before the red line
             self.counter_stop += 1
-            rospy.loginfo(self.counter_stop)
 
         
         
@@ -643,7 +685,7 @@ class MotionNode(DTROS):
             self.when_to_detect_tag += 1
             if self.when_to_detect_tag == 2:
                 self.predict_turn = "straight"
-            if self.when_to_detect_tag <= 4 :
+            if self.when_to_detect_tag < 4 :
                 if self.predict_turn == "straight":
                     self.mode = 7
                     rospy.loginfo("straight")
@@ -659,9 +701,8 @@ class MotionNode(DTROS):
             self.counter_stop = 0
             
         
-        # if self.mode == 1 and  (self.when_to_detect_tag == 4 or self.when_to_detect_tag == 5):
-        #     self.tag_id = self.detect_tag()
-        #     self.mode = 8
+        if self.mode == 1 and  (self.when_to_detect_tag == 4 or self.when_to_detect_tag == 5):
+            self.mode = 8
             
 
         if (self.mode == 0 or self.mode == 3 or self.mode == 4 or self.mode == 9) and red_line_distance < 0.6: #  0 -> 1 if detect_lane = true
@@ -682,54 +723,67 @@ class MotionNode(DTROS):
         
         if self.mode == 0 or self.mode == 2:
             self.move_pid()
-            self.x = (0.0, 1.0, 0.0, 1.0) # white
+            self.x = (0.5, 0.8, 0.0, 0.3) # white
 
         if self.mode == 1: 
             self.stop()
-            self.x = (0.0, 1.0, 0.0, 1.0) # white
+            self.x = (0.5, 0.8, 0.0, 0.3) # white
         
         if self.mode == 3:
             self._v = 0.4
-            self.x = (1.0, 0.0, 0.0, 1.0) # green
+            self.x = (0.8, 0.0, 0.0, 0.3) # green
             self.move_pid()
 
         if self.mode == 4:
-            self.x = (1.0, 0.0, 1.0, 1.0) # 
+            self.x = (1.0, 0.0, 1.0, 0.3) # 
             self.stop()
 
         if self.mode == 5:
-            self.x = (0.0, 1.0, 0.0, 1.0) # white
+            self.x = (0.5, 0.8, 0.0, 0.3) # white
             self.turn_left()
             
         if self.mode == 6:
-            self.x = (0.0, 1.0, 0.0, 1.0) # white
+            self.x = (0.5, 0.8, 0.0, 0.3) # white
             self.turn_right()
 
         if self.mode == 7:
-            self.x = (0.0, 1.0, 0.0, 1.0) # white
+            self.x = (0.5, 0.8, 0.0, 0.3) # white
             self.go_straight()
 
         if self.mode == 8:
+            rospy.loginfo("hi")
             if int(self.tag_id) == 48:
                 self.turn_right()
+                # self.move_pid()
             elif int(self.tag_id) == 50:
                 self.turn_left()
 
-        if self.mode == 9 or self.mode == 11 or self.mode == 12:
+        if self.mode == 9 or self.mode == 11 or self.mode == 12 or self.mode == 16 or self.mode == 18:
             self.move_pid()
-            self.x = (0.0, 1.0, 0.0, 1.0) # white
+            self.x = (0.8, 0.0, 0.0, 0.3) # white
 
         if self.mode == 10:
             self.stop()
-            self.x = (1.0, 1.0, 0.0, 1.0) 
+            self.x = (1.0, 1.0, 0.0, 0.3) 
 
-        if self.mode == 13:
-            self.move_pid()
-            self.x = (1.0, 0.5, 0.7, 1.0) # white
+        if self.mode == 13 or self.mode == 17:
+            # self.move_pid()
+            # self.x = (1.0, 0.5, 0.7, 0.3) # white
+            self.stop()
 
         if self.mode == 14:
-            self.x = (0.0, 1.0, 0.0, 1.0) # white
-            self.turn_right()
+            # self.x = (0.5, 0.8, 0.0, 0.3) # white
+            # self.turn_right()
+            self.move_pid()
+            self.x = (0.8, 0.0, 0.0, 0.3)
+        if self.mode == 15:
+            # self.x = (0.5, 0.8, 0.0, 0.3) # white
+            # self.turn_right()
+            self.move_pid()
+            self.x = (0.8, 0.0, 0.0, 0.3)
+
+        if self.mode == 19:
+            rospy.loginfo("parking")
             
 
 
@@ -747,7 +801,7 @@ if __name__ == '__main__':
 
     rate = rospy.Rate(3)
 
-    node.publish_leds((0.0, 1.0, 0.0, 1.0))
+    node.publish_leds((0.0, 1.0, 0.0, 0.3))
     
     # run node
     while node.gray is None:
