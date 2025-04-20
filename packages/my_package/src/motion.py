@@ -18,9 +18,11 @@ from std_msgs.msg import Header, ColorRGBA, Int32, String
 import math
 import argparse
 
+import sys
+
 class MotionNode(DTROS):
 
-    def __init__(self, node_name):
+    def __init__(self, node_name, sys_slot):
         # initialize the DTROS parent class
         super(MotionNode, self).__init__(node_name=node_name, node_type=NodeType.GENERIC)
         # static parameters
@@ -95,7 +97,7 @@ class MotionNode(DTROS):
         self.prev_x = (0.0, 1.0, 0.0, 0.3)
         self.x = (0.0, 1.0, 0.0, 0.3)
 
-        self.mode = 16
+        self.mode = 20
 
         # mode = 0  ->  pid_control
         # mode = 1  ->  stop for red line
@@ -137,7 +139,10 @@ class MotionNode(DTROS):
         self.blobdetector_min_dist_between_blobs = 1
 
         #sarah Park backwards
-        self.park_slot = 1
+        self.park_slot = int(sys_slot)
+        rospy.loginfo(sys_slot)
+
+        
 
 
         # self.cbParametersChanged() 
@@ -948,8 +953,8 @@ class MotionNode(DTROS):
 
         if self.mode == 20:
             rospy.loginfo("parking")
-            park_slot = int(input("Please input the parking slot number"))
-            if park_slot == 1:
+            # park_slot = int(input("Please input the parking slot number"))
+            if self.park_slot == 1:
                 # rospy.loginfo("hi")
                 # distance = 0
                 # while distance < 60:
@@ -973,7 +978,7 @@ class MotionNode(DTROS):
                 self.stop()
                 
                     
-            elif park_slot == 2:
+            elif self.park_slot == 2:
                 # distance = 0
                 # self.right_turn_dist = 1.4
                 # self.turn_right(-1.9)
@@ -996,7 +1001,7 @@ class MotionNode(DTROS):
                     self.move_pid()
                     t, a = self.detect_tag_sarah()
                 self.stop()
-            elif park_slot == 3:
+            elif self.park_slot == 3:
                 for i in range(4):
                     self.rate.sleep()
                     self.publish_twisted(v = self._v, omega = 2.5)
@@ -1010,7 +1015,7 @@ class MotionNode(DTROS):
                     t, a = self.detect_tag_sarah()
                     rospy.loginfo(a)
                 self.stop()
-            elif park_slot == 4:
+            elif self.park_slot == 4:
                 # distance = 0
                 # self.left_turn_dist = 1
                 # self.turn_left(1.5)
@@ -1043,6 +1048,8 @@ class MotionNode(DTROS):
 
         self.prev_x = self.x
 
+        rospy.signal_shutdown("End of the run")
+
 
         pass
 
@@ -1055,7 +1062,10 @@ class MotionNode(DTROS):
 
 if __name__ == '__main__':
     # create the node
-    node = MotionNode(node_name='my_publisher_node')
+    sys.argv = rospy.myargv(argv=sys.argv)
+    if len(sys.argv) == 2 :
+        slot  = sys.argv[1]
+    node = MotionNode(node_name='my_publisher_node', sys_slot = slot)
 
     rate = rospy.Rate(3)
 
