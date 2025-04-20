@@ -371,7 +371,10 @@ class MotionNode(DTROS):
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
         # black_ranges = {'lower': np.array([110, 150, 100]), 'upper': np.array([120, 250, 200])}
-        black_ranges = {'lower': np.array([110, 80, 50]), 'upper': np.array([130, 255, 255])}
+        # black_ranges = {'lower': np.array([110, 80, 50]), 'upper': np.array([130, 255, 255])}
+        # new range 14:04 04.20
+        black_ranges = {'lower': np.array([110, 80, 70]), 'upper': np.array([120, 250, 240])}
+
         
 
         mask = cv2.inRange(hsv, black_ranges['lower'], black_ranges['upper'])
