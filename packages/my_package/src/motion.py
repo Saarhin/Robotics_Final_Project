@@ -19,6 +19,7 @@ import math
 import argparse
 
 import sys
+import subprocess
 
 class MotionNode(DTROS):
 
@@ -1046,11 +1047,11 @@ class MotionNode(DTROS):
         if self.x != self.prev_x :
             self.publish_leds(self.x)
 
+        
+
         self.prev_x = self.x
 
         rospy.signal_shutdown("End of the run")
-
-
         pass
 
 
