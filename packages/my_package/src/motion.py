@@ -1054,7 +1054,7 @@ class MotionNode(DTROS):
 
     #     self.prev_x = self.x
 
-    #     # rospy.signal_shutdown("End of the run")
+        # rospy.signal_shutdown("End of the run")
 
         self.prev_x = self.x
 
