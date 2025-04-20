@@ -16,6 +16,7 @@ from geometry_msgs.msg import Point32
 
 from std_msgs.msg import Header, ColorRGBA, Int32, String
 import math
+import argparse
 
 class MotionNode(DTROS):
 
@@ -51,6 +52,7 @@ class MotionNode(DTROS):
         self.leader_duckiebot_image = None
         self.leader_duckiebot_turn = None
         self.apriltag_image = None
+        self.apriltag_park_image = None
         self.crosswalk_image = None
         self.gray = None
 
@@ -58,6 +60,10 @@ class MotionNode(DTROS):
         self.proportional_gain = 0.05
         self.derivative_gain = 0.02
         self.integral_gain = 0.001
+
+        self.proportional_gain_backwards = 0.04
+        self.derivative_gain_backwards = 0.01
+        self.integral_gain_backwards = 0.001
 
         #color detection
         self.white_lower = np.array([0, 0, 180], np.uint8) 
@@ -68,9 +74,13 @@ class MotionNode(DTROS):
 
         self.error = 0
         self.prev_error = 0
+        self.error_backwards = 0
+        self.prev_error_backwards = 0
         self.history = np.zeros((1,10))
+        self.history_backwards = np.zeros((1,5))
         # self.history_leader_duckiebot = np.zeros((1,30), dtype=float)
         self.integral = 0
+        self.integral_backwards = 0
         self.calibration = -95
 
         self.rate = rospy.Rate(3)
@@ -85,7 +95,7 @@ class MotionNode(DTROS):
         self.prev_x = (0.0, 1.0, 0.0, 0.3)
         self.x = (0.0, 1.0, 0.0, 0.3)
 
-        self.mode = 9
+        self.mode = 16
 
         # mode = 0  ->  pid_control
         # mode = 1  ->  stop for red line
@@ -125,6 +135,9 @@ class MotionNode(DTROS):
 
         self.blobdetector_min_area = 3
         self.blobdetector_min_dist_between_blobs = 1
+
+        #sarah Park backwards
+        self.park_slot = 1
 
 
         # self.cbParametersChanged() 
@@ -196,9 +209,9 @@ class MotionNode(DTROS):
         self.leader_duckiebot_turn = self.leader_duckiebot_turn_process(self.undisorted_image)
         self.crosswalk_image = self.crosswalk_image_process(self.undisorted_image)
         self.apriltag_image = self.apriltag_image_process(self.undisorted_image)
+        self.apriltag_park_image = self.apriltag_park_image_process(self.undisorted_image)
         self.gray = self.calc_error(self.undisorted_image)
-        image_msg = self._bridge.cv2_to_imgmsg(self.apriltag_image, encoding="8UC1")
-        self.pub_lane.publish(image_msg)
+        
 
     def redline_image_process(self, img):
         h, w, _ = img.shape
@@ -219,6 +232,12 @@ class MotionNode(DTROS):
         h, w, _ = img.shape
         resized_image = img[: , w//4:, :]
 
+        image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
+        return image
+    
+    def apriltag_park_image_process(self, img):
+        h, w, _ = img.shape
+        resized_image = img[: , w//4:-w//4, :]
         image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
         return image
 
@@ -477,7 +496,6 @@ class MotionNode(DTROS):
         
         return False
                   
-    
     def turn_left(self, omega_left = 1.4):
         distance_traveled = 0
         dt = 0.1
@@ -670,9 +688,27 @@ class MotionNode(DTROS):
         # rospy.loginfo(self.error)
         return lane_mask
     
+    def detect_tag_sarah(self):
+        detector = aptag.Detector(families="tag36h11")
+        results = detector.detect(self.apriltag_park_image)
 
+        if results:
 
+            def area(r):
+                # Use corners to compute polygon area
+                (ptA, ptB, ptC, ptD) = r.corners
+                return 0.5 * abs(
+                    ptA[0]*ptB[1] + ptB[0]*ptC[1] + ptC[0]*ptD[1] + ptD[0]*ptA[1]
+                    - ptB[0]*ptA[1] - ptC[0]*ptB[1] - ptD[0]*ptC[1] - ptA[0]*ptD[1]
+                )
 
+            largest_tag = max(results, key=area)
+
+            tag_id = int(largest_tag.tag_id)
+            return tag_id, area(largest_tag)
+        else:
+            return None, float("inf")
+        
     def run(self):
 
         self.rate.sleep()
@@ -712,8 +748,16 @@ class MotionNode(DTROS):
        
 
         # checking if we should change the mode based on the info we are getting
+        if self.mode == 19 and self.counter_stop == self.timer_stop:
+            self.mode = 20
+            self.counter_stop = 0
+
+        if self.mode == 19 and self.counter_stop < self.timer_stop:
+            self.counter_stop += 1
+
         if self.mode == 18 and red_line_distance < 0.6:
             self.mode = 19
+            self.counter_stop = 0
 
         if self.mode == 17: 
             if  self.stop_before_crosswalk < self.timer_stop_crosswalk and not self.detect_ducks(self.crosswalk_image):
@@ -722,7 +766,6 @@ class MotionNode(DTROS):
         if self.mode == 17 and self.stop_before_crosswalk == self.timer_stop_crosswalk:
             self.mode = 18
             self.stop_before_crosswalk = 0
-
         if self.mode == 16  and self.detect_crosswalk(self.crosswalk_image):
             self.mode = 17
             self.stop_before_crosswalk = 0
@@ -887,7 +930,7 @@ class MotionNode(DTROS):
             self.stop()
             self.x = (1.0, 1.0, 0.0, 0.3) 
 
-        if self.mode == 13 or self.mode == 17:
+        if self.mode == 13 or self.mode == 17 or self.mode == 19:
             # self.move_pid()
             # self.x = (1.0, 0.5, 0.7, 0.3) # white
             self.stop()
@@ -903,56 +946,97 @@ class MotionNode(DTROS):
             self.move_pid()
             self.x = (0.8, 0.0, 0.0, 0.3)
 
-        if self.mode == 19:
+        if self.mode == 20:
             rospy.loginfo("parking")
-            park_slot = input("Please input the parking slot number")
+            park_slot = int(input("Please input the parking slot number"))
             if park_slot == 1:
-                distance = 0
-                while distance < 60:
-                    distance = self.detect_parking_tag()
-                    if distance < 30:
-                        self.calibration += 0.05
-                        self.move_pid()
-                        rospy.loginfo("move by usual pid")
-                    else:
-                        self.tag_park_pid(44)
-                        rospy.loginfo("move by tag pid")
-                    rospy.loginfo(distance)
+                # rospy.loginfo("hi")
+                # distance = 0
+                # while distance < 60:
+                #     distance = self.detect_parking_tag()
+                #     if distance < 30:
+                #         self.calibration += 0.05
+                #         self.move_pid()
+                #         rospy.loginfo("move by usual pid")
+                #     else:
+                #         self.tag_park_pid(44)
+                #         rospy.loginfo("move by tag pid")
+                #     rospy.loginfo(distance)
+                # self.stop()
+                t, a = self.detect_tag_sarah()
+                while t is None or t!= 44 or (t == 44 and a < 3000):
+                    self.rate.sleep()
+                    self.move_pid()
+                    t, a = self.detect_tag_sarah()
+                    rospy.loginfo(a)
+
                 self.stop()
+                
+                    
             elif park_slot == 2:
-                distance = 0
-                self.right_turn_dist = 1.4
-                self.turn_right(-1.9)
-                while distance < 90:
-                    distance = self.detect_parking_tag()
-                    if distance < 30:
-                        self.park_pid(58)
-                    else:
-                        self.tag_park_pid(58)
-                    rospy.loginfo(distance)
+                # distance = 0
+                # self.right_turn_dist = 1.4
+                # self.turn_right(-1.9)
+                # while distance < 90:
+                #     distance = self.detect_parking_tag()
+                #     if distance < 30:
+                #         self.park_pid(58)
+                #     else:
+                #         self.tag_park_pid(58)
+                #     rospy.loginfo(distance)
+                for i in range(5):
+                    self.rate.sleep()
+                    self.publish_twisted(v = self._v, omega = -1.5)
+
+                self.calibration = 140
+
+                t, a = self.detect_tag_sarah()
+                while t is None or t!= 58 or (t == 58 and a < 3000):
+                    self.rate.sleep()
+                    self.move_pid()
+                    t, a = self.detect_tag_sarah()
                 self.stop()
             elif park_slot == 3:
-                pass
-            elif park_slot == 4:
-                distance = 0
-                self.left_turn_dist = 1
-                self.turn_left(1.5)
-                while distance < 85:
-                    distance = self.detect_parking_tag()
-                    if distance < 30:
-                        self.calibration += 0.05
-                        self.move_pid()
-                        rospy.loginfo("move by usual pid")
-                    else:
-                        self.tag_park_pid(47)
-                        rospy.loginfo("move by tag pid")
-                    rospy.loginfo(distance)
+                for i in range(4):
+                    self.rate.sleep()
+                    self.publish_twisted(v = self._v, omega = 2.5)
+
+                self.calibration = 140
+
+                t, a = self.detect_tag_sarah()
+                while t is None or t!= 13 or (t == 13 and a < 2500):
+                    self.rate.sleep()
+                    self.move_pid()
+                    t, a = self.detect_tag_sarah()
+                    rospy.loginfo(a)
                 self.stop()
+            elif park_slot == 4:
+                # distance = 0
+                # self.left_turn_dist = 1
+                # self.turn_left(1.5)
+                # while distance < 85:
+                #     distance = self.detect_parking_tag()
+                #     if distance < 30:
+                #         self.calibration += 0.05
+                #         self.move_pid()
+                #         rospy.loginfo("move by usual pid")
+                #     else:
+                #         self.tag_park_pid(47)
+                #         rospy.loginfo("move by tag pid")
+                #     rospy.loginfo(distance)
+                # self.stop()
+                for i in range(10):
+                    self.rate.sleep()
+                    self.publish_twisted(v = self._v, omega = 1)
 
+                t, a = self.detect_tag_sarah()
+                while t is None or t!= 47 or (t == 47 and a < 3000):
+                    self.rate.sleep()
+                    self.move_pid()
+                    t, a = self.detect_tag_sarah()
+                    rospy.loginfo(a)
 
-
-            
-
+                self.stop()
 
         if self.x != self.prev_x :
             self.publish_leds(self.x)
@@ -962,6 +1046,13 @@ class MotionNode(DTROS):
 
         pass
 
+
+# def parse_args():
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument('--park_num', '-p', type=int, default=0, help='Parking number')
+#     return parser.parse_args()
+
+
 if __name__ == '__main__':
     # create the node
     node = MotionNode(node_name='my_publisher_node')
@@ -969,6 +1060,9 @@ if __name__ == '__main__':
     rate = rospy.Rate(3)
 
     node.publish_leds((0.0, 1.0, 0.0, 0.3))
+
+    # parking_number = rospy.get_param("~park_num", 0)
+    # rospy.loginfo(f"Parking number is: {parking_number}")
     
     # run node
     while node.gray is None:
