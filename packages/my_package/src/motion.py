@@ -98,7 +98,7 @@ class MotionNode(DTROS):
         self.prev_x = (0.0, 1.0, 0.0, 0.3)
         self.x = (0.0, 1.0, 0.0, 0.3)
 
-        self.mode = 20
+        self.mode = 0
 
         # mode = 0  ->  pid_control
         # mode = 1  ->  stop for red line
@@ -111,7 +111,7 @@ class MotionNode(DTROS):
         self.left_turn_dist = 1
         self.right_turn_dist = 0.5
         self.straight_turn_dist = 0.8
-        self.when_to_detect_tag = 6
+        self.when_to_detect_tag = 0
 
         self.tag_id = 0
 
@@ -502,30 +502,33 @@ class MotionNode(DTROS):
         
         return False
                   
-    def turn_left(self, omega_left = 1.4):
-        distance_traveled = 0
-        dt = 0.1
-
-        while distance_traveled < self.left_turn_dist:
+    def turn_left(self, omega_left = 1):
+        for i in range(10):
+            self.rate.sleep()
             self.publish_twisted(v=self._v, omega = omega_left)
             self.calc_error(self.undisorted_image)
+
+        while self.error < 60 and self.error > 0:
+            self.publish_twisted(v=self._v, omega = omega_left)
+            self.calc_error(self.undisorted_image) 
             self.rate.sleep()
-            distance_traveled += self._v * dt 
         
         self.stop()
 
         self.predict_turn = "straight"
         rospy.loginfo("done with the left turn")
 
-    def go_straight(self):
-        distance_traveled = 0
-        dt = 0.1
-
-        while distance_traveled < self.straight_turn_dist:
-            self.publish_twisted(v=self._v, omega = -0.2)
-            self.calc_error(self.undisorted_image)
+    def go_straight(self, omega_straight = -0.5):
+        for i in range(10):
             self.rate.sleep()
-            distance_traveled += self._v * dt 
+            self.publish_twisted(v=self._v, omega = omega_straight)
+            self.calc_error(self.undisorted_image)
+
+        while self.error < 60 and self.error > 0:
+            self.publish_twisted(v=self._v, omega = omega_straight)
+            self.calc_error(self.undisorted_image) 
+            self.rate.sleep()
+        
 
         self.stop()
 
@@ -533,14 +536,16 @@ class MotionNode(DTROS):
         rospy.loginfo("done with the moving forward")
 
     def turn_right(self, omega_right = -3.5):
-        distance_traveled = 0
-        dt = 0.1
-
-        while distance_traveled < self.right_turn_dist:
+        for i in range(5):
+            self.rate.sleep()
             self.publish_twisted(v=self._v, omega = omega_right)
             self.calc_error(self.undisorted_image)
+
+        while self.error < 60 and self.error > 0:
+            self.publish_twisted(v=self._v, omega = omega_right)
+            self.calc_error(self.undisorted_image) 
             self.rate.sleep()
-            distance_traveled += self._v * dt 
+            
 
         self.stop()
 
@@ -715,344 +720,353 @@ class MotionNode(DTROS):
         else:
             return None, float("inf")
         
-    def run(self):
+    # def run(self):
 
-        self.rate.sleep()
+    #     self.rate.sleep()
 
-        if self.when_to_detect_tag < 4:
-            self._v = 0.5
-        else:
-            self._v = 0.4
+    #     if self.when_to_detect_tag < 4:
+    #         self._v = 0.5
+    #     else:
+    #         self._v = 0.4
 
-        if self.when_to_detect_tag == 3 or self.when_to_detect_tag == 4:
-            temp_tag = self.detect_tag()
-            if temp_tag:
-                self.tag_id = temp_tag
+    #     if self.when_to_detect_tag == 3 or self.when_to_detect_tag == 4:
+    #         temp_tag = self.detect_tag()
+    #         if temp_tag:
+    #             self.tag_id = temp_tag
         
-        red_line_detected, red_line_distance = self.detect_red_line(self.redline_image)
-        if self.mode < 9 or self.mode == 12 or self.mode == 14:
-            leader_see, leader_distance, temp_dir = self.detect_leader_duckiebot(self.leader_duckiebot_turn)
-            if leader_see:
-                self.predict_turn = temp_dir
-        else:
-            leader_see = False
-            leader_distance = float("inf")
+    #     red_line_detected, red_line_distance = self.detect_red_line(self.redline_image)
+    #     if self.mode < 9 or self.mode == 12 or self.mode == 14:
+    #         leader_see, leader_distance, temp_dir = self.detect_leader_duckiebot(self.leader_duckiebot_turn)
+    #         if leader_see:
+    #             self.predict_turn = temp_dir
+    #     else:
+    #         leader_see = False
+    #         leader_distance = float("inf")
 
-        # if self.mode < 9:
-        #     robot_detected, mid= self.detect_bot(self.leader_duckiebot_turn)
-        #     if robot_detected:
-        #         if mid - self.leader_duckiebot_turn.shape[1]//2 < -20 :
-        #             self.predict_turn = "left"
-        #         elif mid -self.leader_duckiebot_turn.shape[1]//2 > 20:
-        #             self.predict_turn = "right"
-        #         else:
-        #             self.predict_turn = "straight"  
-        #     else:
-        #         leader_distance = float("inf")  
+    #     # if self.mode < 9:
+    #     #     robot_detected, mid= self.detect_bot(self.leader_duckiebot_turn)
+    #     #     if robot_detected:
+    #     #         if mid - self.leader_duckiebot_turn.shape[1]//2 < -20 :
+    #     #             self.predict_turn = "left"
+    #     #         elif mid -self.leader_duckiebot_turn.shape[1]//2 > 20:
+    #     #             self.predict_turn = "right"
+    #     #         else:
+    #     #             self.predict_turn = "straight"  
+    #     #     else:
+    #     #         leader_distance = float("inf")  
 
 
        
 
-        # checking if we should change the mode based on the info we are getting
-        if self.mode == 19 and self.counter_stop == self.timer_stop:
-            self.mode = 20
-            self.counter_stop = 0
+    #     # checking if we should change the mode based on the info we are getting
+    #     if self.mode == 19 and self.counter_stop == self.timer_stop:
+    #         self.mode = 20
+    #         self.counter_stop = 0
 
-        if self.mode == 19 and self.counter_stop < self.timer_stop:
-            self.counter_stop += 1
+    #     if self.mode == 19 and self.counter_stop < self.timer_stop:
+    #         self.counter_stop += 1
 
-        if self.mode == 18 and red_line_distance < 0.6:
-            self.mode = 19
-            self.counter_stop = 0
+    #     if self.mode == 18 and red_line_distance < 0.6:
+    #         self.mode = 19
+    #         self.counter_stop = 0
 
-        if self.mode == 17: 
-            if  self.stop_before_crosswalk < self.timer_stop_crosswalk and not self.detect_ducks(self.crosswalk_image):
-                self.stop_before_crosswalk +=1
+    #     if self.mode == 17: 
+    #         if  self.stop_before_crosswalk < self.timer_stop_crosswalk and not self.detect_ducks(self.crosswalk_image):
+    #             self.stop_before_crosswalk +=1
 
-        if self.mode == 17 and self.stop_before_crosswalk == self.timer_stop_crosswalk:
-            self.mode = 18
-            self.stop_before_crosswalk = 0
-        if self.mode == 16  and self.detect_crosswalk(self.crosswalk_image):
-            self.mode = 17
-            self.stop_before_crosswalk = 0
+    #     if self.mode == 17 and self.stop_before_crosswalk == self.timer_stop_crosswalk:
+    #         self.mode = 18
+    #         self.stop_before_crosswalk = 0
+    #     if self.mode == 16  and self.detect_crosswalk(self.crosswalk_image):
+    #         self.mode = 17
+    #         self.stop_before_crosswalk = 0
 
-        if self.mode == 15 and self.counter_yellow_line_left == self.timer_yellow_line_left:
-            self.counter_yellow_line_left = 0 
-            self.calibration *= -1
-            self.mode = 16
+    #     if self.mode == 15 and self.counter_yellow_line_left == self.timer_yellow_line_left:
+    #         self.counter_yellow_line_left = 0 
+    #         self.calibration *= -1
+    #         self.mode = 16
 
-        if self.mode == 15 and self.counter_yellow_line_left < self.timer_yellow_line_left:
-            self.counter_yellow_line_left +=1
+    #     if self.mode == 15 and self.counter_yellow_line_left < self.timer_yellow_line_left:
+    #         self.counter_yellow_line_left +=1
 
-        if self.mode == 14 and self.counter_yellow_line_right == self.timer_yellow_line_right:
-            self.calibration *= -1
-            self.mode = 15
-            self.counter_yellow_line_left = 0
+    #     if self.mode == 14 and self.counter_yellow_line_right == self.timer_yellow_line_right:
+    #         self.calibration *= -1
+    #         self.mode = 15
+    #         self.counter_yellow_line_left = 0
         
 
-        if self.mode == 14 and self.counter_yellow_line_right < self.timer_yellow_line_right:
-            self.counter_yellow_line_right +=1
+    #     if self.mode == 14 and self.counter_yellow_line_right < self.timer_yellow_line_right:
+    #         self.counter_yellow_line_right +=1
 
-        if self.mode == 13 and self.count_stop_for_broken == self.timer_stop_for_broken:
-            self.mode = 14
-            self.count_stop_for_broken = 0
-            self.counter_yellow_line_right = 0
+    #     if self.mode == 13 and self.count_stop_for_broken == self.timer_stop_for_broken:
+    #         self.mode = 14
+    #         self.count_stop_for_broken = 0
+    #         self.counter_yellow_line_right = 0
             
 
-        if self.mode == 13 and self.count_stop_for_broken < self.timer_stop_for_broken:
-            self.count_stop_for_broken += 1
+    #     if self.mode == 13 and self.count_stop_for_broken < self.timer_stop_for_broken:
+    #         self.count_stop_for_broken += 1
 
-        if self.mode == 12 and leader_distance < 0.55:
-            self.mode = 13
-            self.count_stop_for_broken = 0
+    #     if self.mode == 12 and leader_distance < 0.55:
+    #         self.mode = 13
+    #         self.count_stop_for_broken = 0
 
-        if self.mode == 11 and self.stop_before_crosswalk < self.timer_avoid_crosswalk:
-            self.stop_before_crosswalk +=1
+    #     if self.mode == 11 and self.stop_before_crosswalk < self.timer_avoid_crosswalk:
+    #         self.stop_before_crosswalk +=1
         
-        if self.mode == 11 and self.stop_before_crosswalk == self.timer_avoid_crosswalk:
-            self.mode = 12
-            self.stop_before_crosswalk = 0
+    #     if self.mode == 11 and self.stop_before_crosswalk == self.timer_avoid_crosswalk:
+    #         self.mode = 12
+    #         self.stop_before_crosswalk = 0
             
         
-        if self.mode == 10: 
-            if  self.stop_before_crosswalk < self.timer_stop_crosswalk and not self.detect_ducks(self.crosswalk_image):
-                self.stop_before_crosswalk +=1
+    #     if self.mode == 10: 
+    #         if  self.stop_before_crosswalk < self.timer_stop_crosswalk and not self.detect_ducks(self.crosswalk_image):
+    #             self.stop_before_crosswalk +=1
 
-        if self.mode == 10 and self.stop_before_crosswalk == self.timer_stop_crosswalk:
-            self.mode = 11
-            self.stop_before_crosswalk = 0
+    #     if self.mode == 10 and self.stop_before_crosswalk == self.timer_stop_crosswalk:
+    #         self.mode = 11
+    #         self.stop_before_crosswalk = 0
             
         
-        if self.mode == 9  and self.detect_crosswalk(self.crosswalk_image):
-            self.mode = 10
-            self.stop_before_crosswalk = 0
+    #     if self.mode == 9  and self.detect_crosswalk(self.crosswalk_image):
+    #         self.mode = 10
+    #         self.stop_before_crosswalk = 0
 
            
-        if self.mode == 8:
-            self.mode = 9
+    #     if self.mode == 8:
+    #         self.mode = 9
 
-        if self.mode == 5 or self.mode == 6 or self.mode == 7:
-            self.mode = 0
+    #     if self.mode == 5 or self.mode == 6 or self.mode == 7:
+    #         self.mode = 0
 
-        if (self.mode == 4 or self.mode == 3) and leader_distance > 0.6:
-            self.mode = 0
+    #     if (self.mode == 4 or self.mode == 3) and leader_distance > 0.6:
+    #         self.mode = 0
             
 
-        if self.mode != 1 and self.mode < 12 and leader_see and leader_distance >= 0.3 and leader_see and leader_distance <= 0.6:
-            self.mode = 3
+    #     if self.mode != 1 and self.mode < 12 and leader_see and leader_distance >= 0.3 and leader_see and leader_distance <= 0.6:
+    #         self.mode = 3
 
-        if self.mode != 1 and self.mode < 12  and leader_see and leader_distance < 0.3:
-            self.mode = 4
+    #     if self.mode != 1 and self.mode < 12  and leader_see and leader_distance < 0.3:
+    #         self.mode = 4
 
        
-        if self.mode == 1 and self.counter_stop < self.timer_stop: # 1 -> 1 stop for some time before the red line
-            self.counter_stop += 1
+    #     if self.mode == 1 and self.counter_stop < self.timer_stop: # 1 -> 1 stop for some time before the red line
+    #         self.counter_stop += 1
 
         
         
-        if self.mode == 1 and self.counter_stop == self.timer_stop: # 1 -> 2 start moving without detecting the red line  
-            rospy.loginfo(self.predict_turn )
-            self.when_to_detect_tag += 1
-            if self.when_to_detect_tag == 2:
-                self.predict_turn = "straight"
-            if self.when_to_detect_tag < 4 :
-                if self.predict_turn == "straight":
-                    self.mode = 7
-                    rospy.loginfo("straight")
-                elif self.predict_turn == "left":
-                    self.mode = 5
-                    rospy.loginfo("left")
-                elif self.predict_turn == "right":
-                    self.mode = 6
-                    rospy.loginfo("right")
-            else:
-                rospy.loginfo("more than 4 stops")
+    #     if self.mode == 1 and self.counter_stop == self.timer_stop: # 1 -> 2 start moving without detecting the red line  
+    #         rospy.loginfo(self.predict_turn )
+    #         self.when_to_detect_tag += 1
+    #         if self.when_to_detect_tag == 2:
+    #             self.predict_turn = "straight"
+    #         if self.when_to_detect_tag < 4 :
+    #             if self.predict_turn == "straight":
+    #                 self.mode = 7
+    #                 rospy.loginfo("straight")
+    #             elif self.predict_turn == "left":
+    #                 self.mode = 5
+    #                 rospy.loginfo("left")
+    #             elif self.predict_turn == "right":
+    #                 self.mode = 6
+    #                 rospy.loginfo("right")
+    #         else:
+    #             rospy.loginfo("more than 4 stops")
 
-            self.counter_stop = 0
+    #         self.counter_stop = 0
             
         
-        if self.mode == 1 and  (self.when_to_detect_tag == 4 or self.when_to_detect_tag == 5):
-            self.mode = 8
+    #     if self.mode == 1 and  (self.when_to_detect_tag == 4 or self.when_to_detect_tag == 5):
+    #         self.mode = 8
             
 
-        if (self.mode == 0 or self.mode == 3 or self.mode == 4 or self.mode == 9) and red_line_distance < 0.6: #  0 -> 1 if detect_lane = true
-            self.mode = 1
-            self.counter_stop = 0
+    #     if (self.mode == 0 or self.mode == 3 or self.mode == 4 or self.mode == 9) and red_line_distance < 0.6: #  0 -> 1 if detect_lane = true
+    #         self.mode = 1
+    #         self.counter_stop = 0
 
 
-        # if (self.mode == 2 or self.mode == 4 or self.mode == 5) and self.counter_avoid_red < self.timer_avoid_redline: # 2 -> 2 still don't want to detect the red line
-        #     self.counter_avoid_red +=1
+    #     # if (self.mode == 2 or self.mode == 4 or self.mode == 5) and self.counter_avoid_red < self.timer_avoid_redline: # 2 -> 2 still don't want to detect the red line
+    #     #     self.counter_avoid_red +=1
 
-        # if self.mode == 2 and self.counter_avoid_red == self.timer_avoid_redline: # 2 - > 0 you can check if you see red line
-        #     self.counter_avoid_red = 0
-        #     self.mode = 0
+    #     # if self.mode == 2 and self.counter_avoid_red == self.timer_avoid_redline: # 2 - > 0 you can check if you see red line
+    #     #     self.counter_avoid_red = 0
+    #     #     self.mode = 0
         
         
         
-        # deciding what to do based on the mode we are in
+    #     # deciding what to do based on the mode we are in
         
-        if self.mode == 0 or self.mode == 2:
-            self.move_pid()
-            self.x = (0.5, 0.8, 0.0, 0.3) # white
+    #     if self.mode == 0 or self.mode == 2:
+    #         self.move_pid()
+    #         self.x = (0.5, 0.8, 0.0, 0.3) # white
 
-        if self.mode == 1: 
-            self.stop()
-            self.x = (0.5, 0.8, 0.0, 0.3) # white
+    #     if self.mode == 1: 
+    #         self.stop()
+    #         self.x = (0.5, 0.8, 0.0, 0.3) # white
         
-        if self.mode == 3:
-            self._v = 0.4
-            self.x = (0.8, 0.0, 0.0, 0.3) # green
-            self.move_pid()
+    #     if self.mode == 3:
+    #         self._v = 0.4
+    #         self.x = (0.8, 0.0, 0.0, 0.3) # green
+    #         self.move_pid()
 
-        if self.mode == 4:
-            self.x = (1.0, 0.0, 1.0, 0.3) # 
-            self.stop()
+    #     if self.mode == 4:
+    #         self.x = (1.0, 0.0, 1.0, 0.3) # 
+    #         self.stop()
 
-        if self.mode == 5:
-            self.x = (0.5, 0.8, 0.0, 0.3) # white
-            self.turn_left()
+    #     if self.mode == 5:
+    #         self.x = (0.5, 0.8, 0.0, 0.3) # white
+    #         self.turn_left()
             
-        if self.mode == 6:
-            self.x = (0.5, 0.8, 0.0, 0.3) # white
-            self.turn_right()
+    #     if self.mode == 6:
+    #         self.x = (0.5, 0.8, 0.0, 0.3) # white
+    #         self.turn_right()
 
-        if self.mode == 7:
-            self.x = (0.5, 0.8, 0.0, 0.3) # white
-            self.go_straight()
+    #     if self.mode == 7:
+    #         self.x = (0.5, 0.8, 0.0, 0.3) # white
+    #         self.go_straight()
 
-        if self.mode == 8:
-            rospy.loginfo("hi")
-            if int(self.tag_id) == 48:
-                self.turn_right()
-                # self.move_pid()
-            elif int(self.tag_id) == 50:
-                self.turn_left()
+    #     if self.mode == 8:
+    #         rospy.loginfo("hi")
+    #         if int(self.tag_id) == 48:
+    #             self.turn_right()
+    #             # self.move_pid()
+    #         elif int(self.tag_id) == 50:
+    #             self.turn_left()
 
-        if self.mode == 9 or self.mode == 11 or self.mode == 12 or self.mode == 16 or self.mode == 18:
-            self.move_pid()
-            self.x = (0.8, 0.0, 0.0, 0.3) # white
+    #     if self.mode == 9 or self.mode == 11 or self.mode == 12 or self.mode == 16 or self.mode == 18:
+    #         self.move_pid()
+    #         self.x = (0.8, 0.0, 0.0, 0.3) # white
 
-        if self.mode == 10:
-            self.stop()
-            self.x = (1.0, 1.0, 0.0, 0.3) 
+    #     if self.mode == 10:
+    #         self.stop()
+    #         self.x = (1.0, 1.0, 0.0, 0.3) 
 
-        if self.mode == 13 or self.mode == 17 or self.mode == 19:
-            # self.move_pid()
-            # self.x = (1.0, 0.5, 0.7, 0.3) # white
-            self.stop()
+    #     if self.mode == 13 or self.mode == 17 or self.mode == 19:
+    #         # self.move_pid()
+    #         # self.x = (1.0, 0.5, 0.7, 0.3) # white
+    #         self.stop()
 
-        if self.mode == 14:
-            # self.x = (0.5, 0.8, 0.0, 0.3) # white
-            # self.turn_right()
-            self.move_pid()
-            self.x = (0.8, 0.0, 0.0, 0.3)
-        if self.mode == 15:
-            # self.x = (0.5, 0.8, 0.0, 0.3) # white
-            # self.turn_right()
-            self.move_pid()
-            self.x = (0.8, 0.0, 0.0, 0.3)
+    #     if self.mode == 14:
+    #         # self.x = (0.5, 0.8, 0.0, 0.3) # white
+    #         # self.turn_right()
+    #         self.move_pid()
+    #         self.x = (0.8, 0.0, 0.0, 0.3)
+    #     if self.mode == 15:
+    #         # self.x = (0.5, 0.8, 0.0, 0.3) # white
+    #         # self.turn_right()
+    #         self.move_pid()
+    #         self.x = (0.8, 0.0, 0.0, 0.3)
 
-        if self.mode == 20:
-            rospy.loginfo("parking")
-            # park_slot = int(input("Please input the parking slot number"))
-            if self.park_slot == 1:
-                # rospy.loginfo("hi")
-                # distance = 0
-                # while distance < 60:
-                #     distance = self.detect_parking_tag()
-                #     if distance < 30:
-                #         self.calibration += 0.05
-                #         self.move_pid()
-                #         rospy.loginfo("move by usual pid")
-                #     else:
-                #         self.tag_park_pid(44)
-                #         rospy.loginfo("move by tag pid")
-                #     rospy.loginfo(distance)
-                # self.stop()
-                t, a = self.detect_tag_sarah()
-                while t is None or t!= 44 or (t == 44 and a < 3000):
-                    self.rate.sleep()
-                    self.move_pid()
-                    t, a = self.detect_tag_sarah()
-                    rospy.loginfo(a)
+    #     if self.mode == 20:
+    #         rospy.loginfo("parking")
+    #         # park_slot = int(input("Please input the parking slot number"))
+    #         if self.park_slot == 1:
+    #             # rospy.loginfo("hi")
+    #             # distance = 0
+    #             # while distance < 60:
+    #             #     distance = self.detect_parking_tag()
+    #             #     if distance < 30:
+    #             #         self.calibration += 0.05
+    #             #         self.move_pid()
+    #             #         rospy.loginfo("move by usual pid")
+    #             #     else:
+    #             #         self.tag_park_pid(44)
+    #             #         rospy.loginfo("move by tag pid")
+    #             #     rospy.loginfo(distance)
+    #             # self.stop()
+    #             t, a = self.detect_tag_sarah()
+    #             while t is None or t!= 44 or (t == 44 and a < 3000):
+    #                 self.rate.sleep()
+    #                 self.move_pid()
+    #                 t, a = self.detect_tag_sarah()
+    #                 rospy.loginfo(a)
 
-                self.stop()
+    #             self.stop()
                 
                     
-            elif self.park_slot == 2:
-                # distance = 0
-                # self.right_turn_dist = 1.4
-                # self.turn_right(-1.9)
-                # while distance < 90:
-                #     distance = self.detect_parking_tag()
-                #     if distance < 30:
-                #         self.park_pid(58)
-                #     else:
-                #         self.tag_park_pid(58)
-                #     rospy.loginfo(distance)
-                for i in range(5):
-                    self.rate.sleep()
-                    self.publish_twisted(v = self._v, omega = -1.5)
+    #         elif self.park_slot == 2:
+    #             # distance = 0
+    #             # self.right_turn_dist = 1.4
+    #             # self.turn_right(-1.9)
+    #             # while distance < 90:
+    #             #     distance = self.detect_parking_tag()
+    #             #     if distance < 30:
+    #             #         self.park_pid(58)
+    #             #     else:
+    #             #         self.tag_park_pid(58)
+    #             #     rospy.loginfo(distance)
+    #             for i in range(5):
+    #                 self.rate.sleep()
+    #                 self.publish_twisted(v = self._v, omega = -1.5)
 
-                self.calibration = 140
+    #             self.calibration = 140
 
-                t, a = self.detect_tag_sarah()
-                while t is None or t!= 58 or (t == 58 and a < 3000):
-                    self.rate.sleep()
-                    self.move_pid()
-                    t, a = self.detect_tag_sarah()
-                self.stop()
-            elif self.park_slot == 3:
-                for i in range(4):
-                    self.rate.sleep()
-                    self.publish_twisted(v = self._v, omega = 2.5)
+    #             t, a = self.detect_tag_sarah()
+    #             while t is None or t!= 58 or (t == 58 and a < 3000):
+    #                 self.rate.sleep()
+    #                 self.move_pid()
+    #                 t, a = self.detect_tag_sarah()
+    #             self.stop()
+    #         elif self.park_slot == 3:
+    #             for i in range(4):
+    #                 self.rate.sleep()
+    #                 self.publish_twisted(v = self._v, omega = 2.5)
 
-                self.calibration = 140
+    #             self.calibration = 140
 
-                t, a = self.detect_tag_sarah()
-                while t is None or t!= 13 or (t == 13 and a < 2500):
-                    self.rate.sleep()
-                    self.move_pid()
-                    t, a = self.detect_tag_sarah()
-                    rospy.loginfo(a)
-                self.stop()
-            elif self.park_slot == 4:
-                # distance = 0
-                # self.left_turn_dist = 1
-                # self.turn_left(1.5)
-                # while distance < 85:
-                #     distance = self.detect_parking_tag()
-                #     if distance < 30:
-                #         self.calibration += 0.05
-                #         self.move_pid()
-                #         rospy.loginfo("move by usual pid")
-                #     else:
-                #         self.tag_park_pid(47)
-                #         rospy.loginfo("move by tag pid")
-                #     rospy.loginfo(distance)
-                # self.stop()
-                for i in range(10):
-                    self.rate.sleep()
-                    self.publish_twisted(v = self._v, omega = 1)
+    #             t, a = self.detect_tag_sarah()
+    #             while t is None or t!= 13 or (t == 13 and a < 2500):
+    #                 self.rate.sleep()
+    #                 self.move_pid()
+    #                 t, a = self.detect_tag_sarah()
+    #                 rospy.loginfo(a)
+    #             self.stop()
+    #         elif self.park_slot == 4:
+    #             # distance = 0
+    #             # self.left_turn_dist = 1
+    #             # self.turn_left(1.5)
+    #             # while distance < 85:
+    #             #     distance = self.detect_parking_tag()
+    #             #     if distance < 30:
+    #             #         self.calibration += 0.05
+    #             #         self.move_pid()
+    #             #         rospy.loginfo("move by usual pid")
+    #             #     else:
+    #             #         self.tag_park_pid(47)
+    #             #         rospy.loginfo("move by tag pid")
+    #             #     rospy.loginfo(distance)
+    #             # self.stop()
+    #             for i in range(10):
+    #                 self.rate.sleep()
+    #                 self.publish_twisted(v = self._v, omega = 1)
 
-                t, a = self.detect_tag_sarah()
-                while t is None or t!= 47 or (t == 47 and a < 3000):
-                    self.rate.sleep()
-                    self.move_pid()
-                    t, a = self.detect_tag_sarah()
-                    rospy.loginfo(a)
+    #             t, a = self.detect_tag_sarah()
+    #             while t is None or t!= 47 or (t == 47 and a < 3000):
+    #                 self.rate.sleep()
+    #                 self.move_pid()
+    #                 t, a = self.detect_tag_sarah()
+    #                 rospy.loginfo(a)
 
-                self.stop()
+    #             self.stop()
 
-        if self.x != self.prev_x :
-            self.publish_leds(self.x)
+    #     if self.x != self.prev_x :
+    #         self.publish_leds(self.x)
 
-        
+    #     self.prev_x = self.x
+
+    #     # rospy.signal_shutdown("End of the run")
 
         self.prev_x = self.x
 
-        rospy.signal_shutdown("End of the run")
-        pass
+    #     pass
+
+    def run(self):
+        self.go_straight()
+        rospy.loginfo("start pid")
+
+        for i in range(10):
+            self.rate.sleep()
+            self.move_pid()
 
 
 # def parse_args():
