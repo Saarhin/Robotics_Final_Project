@@ -7,7 +7,7 @@ dt-launchfile-init
 
 
 # launch subscriber
-rosrun my_package motion.py 5
+rosrun my_package motion.py 3
 
 # wait for app to end
 dt-launchfile-join

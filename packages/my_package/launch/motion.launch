@@ -1,11 +1,9 @@
 <launch>
-  <arg name="park_num" default="0" doc="Parking number"/>
-  <arg name="veh" default="default" doc="Vehicle name"/>
 
   <group ns="$(arg veh)">
-    <node pkg="my_package" type="MY_NODE.py" name="MAY_NODE_NAME" output="screen">
-      <param name="park_num" value="$(arg park_num)"/>
-    </node>
+
+    <node pkg="my_package" type="motion.py" name="my_publisher_node" output="screen"/>
+
   </group>
 
 </launch>

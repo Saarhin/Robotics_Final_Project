@@ -12,15 +12,20 @@ from cv_bridge import CvBridge
 import numpy as np
 from duckietown_msgs.msg import LEDPattern 
 import dt_apriltags as aptag
+from geometry_msgs.msg import Point32
 
 from std_msgs.msg import Header, ColorRGBA, Int32, String
 import math
+import argparse
 
-class MotionBotNode(DTROS):
+import sys
+import subprocess
 
-    def __init__(self, node_name):
+class MotionNode(DTROS):
+
+    def __init__(self, node_name, sys_slot):
         # initialize the DTROS parent class
-        super(MotionBotNode, self).__init__(node_name=node_name, node_type=NodeType.GENERIC)
+        super(MotionNode, self).__init__(node_name=node_name, node_type=NodeType.GENERIC)
         # static parameters
         self._vehicle_name = os.environ['VEHICLE_NAME']
 
@@ -50,13 +55,18 @@ class MotionBotNode(DTROS):
         self.leader_duckiebot_image = None
         self.leader_duckiebot_turn = None
         self.apriltag_image = None
+        self.apriltag_park_image = None
         self.crosswalk_image = None
         self.gray = None
 
         self.control_type = "PID"
         self.proportional_gain = 0.05
-        self.derivative_gain = 0.03
+        self.derivative_gain = 0.02
         self.integral_gain = 0.001
+
+        self.proportional_gain_backwards = 0.04
+        self.derivative_gain_backwards = 0.01
+        self.integral_gain_backwards = 0.001
 
         #color detection
         self.white_lower = np.array([0, 0, 180], np.uint8) 
@@ -67,20 +77,26 @@ class MotionBotNode(DTROS):
 
         self.error = 0
         self.prev_error = 0
+        self.error_backwards = 0
+        self.prev_error_backwards = 0
         self.history = np.zeros((1,10))
+        self.history_backwards = np.zeros((1,5))
         # self.history_leader_duckiebot = np.zeros((1,30), dtype=float)
         self.integral = 0
-        self.calibration = -90
+        self.integral_backwards = 0
+        self.calibration = -95
 
-        self.rate = rospy.Rate(3)
+        self.rate = rospy.Rate(10)
 
         self.timer_avoid_redline = 30
         self.timer_stop = 10
+        self.timer_stop_for_broken = 5
         self.counter_avoid_red = 0
         self.counter_stop = 0
+        self.count_stop_for_broken = 0
 
-        self.prev_x = (1.0, 1.0, 1.0, 1.0)
-        self.x = (1.0, 1.0, 1.0, 1.0)
+        self.prev_x = (0.0, 1.0, 0.0, 0.3)
+        self.x = (0.0, 1.0, 0.0, 0.3)
 
         self.mode = 0
 
@@ -92,25 +108,42 @@ class MotionBotNode(DTROS):
         self.count_stops = 0
         self.predict_turn = "straight"
 
-        self.left_turn_dist = 2
+        self.left_turn_dist = 1
         self.right_turn_dist = 0.5
-        self.straight_turn_dist = 2
+        self.straight_turn_dist = 0.8
         self.when_to_detect_tag = 0
 
         self.tag_id = 0
 
         self.stop_before_crosswalk = 0
-        self.timer_avoid_crosswalk = 60
+        self.timer_avoid_crosswalk = 20
         self.timer_stop_crosswalk = 10
 
-        self.counter_yellow_line = 0
-        self.timer_yellow_line = 50
+        self.counter_yellow_line_left = 0
+        self.timer_yellow_line_left = 10
+
+        self.counter_yellow_line_right = 0
+        self.timer_yellow_line_right = 15
 
 
         #test
         self._custom_topic_lane = f"/{self._vehicle_name}/custom_node/image/black"
         self.pub_lane = rospy.Publisher(self._custom_topic_lane, Image, queue_size=1)
 
+        #test_blob
+
+        self.last_stamp = rospy.Time.now()
+        self.process_frequency = 2
+        self.circlepattern_dims = [7, 3]
+
+        self.blobdetector_min_area = 3
+        self.blobdetector_min_dist_between_blobs = 1
+
+        #sarah Park backwards
+        self.park_slot = int(sys_slot)
+        rospy.loginfo(sys_slot)
+
+        
 
     def callback_info(self, msg):
 
@@ -137,9 +170,9 @@ class MotionBotNode(DTROS):
         self.leader_duckiebot_turn = self.leader_duckiebot_turn_process(self.undisorted_image)
         self.crosswalk_image = self.crosswalk_image_process(self.undisorted_image)
         self.apriltag_image = self.apriltag_image_process(self.undisorted_image)
+        self.apriltag_park_image = self.apriltag_park_image_process(self.undisorted_image)
         self.gray = self.calc_error(self.undisorted_image)
-        # image_msg = self._bridge.cv2_to_imgmsg(self.crosswalk_image, encoding="rgb8")
-        # self.pub_lane.publish(image_msg)
+        
 
     def redline_image_process(self, img):
         h, w, _ = img.shape
@@ -162,6 +195,12 @@ class MotionBotNode(DTROS):
 
         image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
         return image
+    
+    def apriltag_park_image_process(self, img):
+        h, w, _ = img.shape
+        resized_image = img[: , w//4:-w//4, :]
+        image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
+        return image
 
     def crosswalk_image_process(self, img):
         h, w, _ = img.shape
@@ -173,8 +212,7 @@ class MotionBotNode(DTROS):
         new_width = 400
         new_height = 300
         resized_image = cv2.resize(img, (new_width, new_height), interpolation = cv2.INTER_AREA)
-        blurred_image = cv2.blur(resized_image, (5, 5)) 
-        return blurred_image
+        return resized_image
     
     def calc_error(self, imageFrame):
 
@@ -188,7 +226,7 @@ class MotionBotNode(DTROS):
 
         hsvFrame = cv2.cvtColor(imageFrame, cv2.COLOR_BGR2HSV)
 
-        if self.mode == 13:
+        if self.mode == 14 or self.mode == 15:
             yellow_mask = cv2.inRange(hsvFrame, self.yellow_lower, self.yellow_upper) 
 
             yellow_mask = cv2.dilate(yellow_mask, kernel) 
@@ -250,13 +288,12 @@ class MotionBotNode(DTROS):
         self.publish_twisted(v=self._v, omega = -1*control)
         self.calc_error(self.undisorted_image)
         
-
     def stop(self):
         self.publish_twisted(v = 0, omega = 0)
 
     def on_shutdown(self):
         self.publish_twisted(v = 0, omega = 0)
-        self.publish_leds((1.0, 1.0, 1.0, 1.0))
+        self.publish_leds((0.0, 1.0, 0.0, 0.3))
 
     def detect_red_line(self, image):
         if image is None:
@@ -286,31 +323,37 @@ class MotionBotNode(DTROS):
     def detect_leader_duckiebot(self, image):
         if image is None:
             return
-        
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-        black_ranges = {'lower': np.array([110, 150, 100]), 'upper': np.array([120, 250, 200])}
+        # black_ranges = {'lower': np.array([110, 150, 100]), 'upper': np.array([120, 250, 200])}
+        # black_ranges = {'lower': np.array([110, 80, 50]), 'upper': np.array([130, 255, 255])}
+        # new range 14:04 04.20
+        black_ranges = {'lower': np.array([110, 80, 70]), 'upper': np.array([120, 250, 240])}
+
         
 
         mask = cv2.inRange(hsv, black_ranges['lower'], black_ranges['upper'])
 
+        
        
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         
         if contours:
             largest_contour = max(contours, key=cv2.contourArea)
+          
             
-            if cv2.contourArea(largest_contour) > 2:
+            if cv2.contourArea(largest_contour) > 3:
                 x, y, w, h = cv2.boundingRect(largest_contour)
                 
                 # Estimate distance based on contour position
                 image_height = image.shape[0]
                 distance = (image_height - (y + h)) / image_height
                 middle = x+w//2
-                if middle < image.shape[1]//2 and abs(middle - image.shape[1]//2) > 30:
+                
+                if middle < image.shape[1]//2 and abs(middle - image.shape[1]//2) > 50:
                     return True , distance, "left"
-                if middle > image.shape[1]//2 and abs(middle - image.shape[1]//2) > 30:
+                if middle > image.shape[1]//2 and abs(middle - image.shape[1]//2) > 50:
                     return True , distance, "right"
                 return True, distance,  "straight"
             
@@ -347,30 +390,27 @@ class MotionBotNode(DTROS):
                 return True, distance,  "straight"
             
         return False, float("inf"), "straight"
-            
-    
+               
     def detect_tag(self):
         detector = aptag.Detector(families="tag36h11")
         results = detector.detect(self.apriltag_image)
 
-        while not results:
-            results = detector.detect(self.apriltag_image)
+        if results:
 
-        
-       
-           
-        def area(r):
-            # Use corners to compute polygon area
-            (ptA, ptB, ptC, ptD) = r.corners
-            return 0.5 * abs(
-                ptA[0]*ptB[1] + ptB[0]*ptC[1] + ptC[0]*ptD[1] + ptD[0]*ptA[1]
-                - ptB[0]*ptA[1] - ptC[0]*ptB[1] - ptD[0]*ptC[1] - ptA[0]*ptD[1]
-            )
+            def area(r):
+                # Use corners to compute polygon area
+                (ptA, ptB, ptC, ptD) = r.corners
+                return 0.5 * abs(
+                    ptA[0]*ptB[1] + ptB[0]*ptC[1] + ptC[0]*ptD[1] + ptD[0]*ptA[1]
+                    - ptB[0]*ptA[1] - ptC[0]*ptB[1] - ptD[0]*ptC[1] - ptA[0]*ptD[1]
+                )
 
-        largest_tag = max(results, key=area)
+            largest_tag = max(results, key=area)
 
-        tag_id = str(largest_tag.tag_id)
-        return tag_id
+            tag_id = str(largest_tag.tag_id)
+            return tag_id
+        else:
+            return None
     
     def detect_crosswalk(self, image):
         if image is None:
@@ -383,14 +423,11 @@ class MotionBotNode(DTROS):
 
         mask = cv2.inRange(hsv, black_ranges['lower'], black_ranges['upper'])
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        image_msg = self._bridge.cv2_to_imgmsg(mask, encoding="8UC1")
-        self.pub_lane.publish(image_msg)
         
         
         if contours:
             largest_contour = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(largest_contour) > 400:
+            if cv2.contourArea(largest_contour) > 200:
                 
                 return True
                     
@@ -423,42 +460,52 @@ class MotionBotNode(DTROS):
         
         return False
                   
-    
-    def turn_left(self):
-        distance_traveled = 0
-        dt = 0.1
-
-        while distance_traveled < self.left_turn_dist:
-            self.publish_twisted(v=self._v, omega = 1)
-            self.calc_error(self.undisorted_image)
+    def turn_left(self, omega_left = 1):
+        for i in range(10):
             self.rate.sleep()
-            distance_traveled += self._v * dt 
+            self.publish_twisted(v=self._v, omega = omega_left)
+            self.calc_error(self.undisorted_image)
+
+        while self.error < 60 and self.error > 0:
+            self.publish_twisted(v=self._v, omega = omega_left)
+            self.calc_error(self.undisorted_image) 
+            self.rate.sleep()
+        
+        self.stop()
 
         self.predict_turn = "straight"
         rospy.loginfo("done with the left turn")
 
-    def go_straight(self):
-        distance_traveled = 0
-        dt = 0.1
-
-        while distance_traveled < self.straight_turn_dist:
-            self.publish_twisted(v=self._v, omega = 0)
-            self.calc_error(self.undisorted_image)
+    def go_straight(self, omega_straight = -0.5):
+        for i in range(10):
             self.rate.sleep()
-            distance_traveled += self._v * dt 
+            self.publish_twisted(v=self._v, omega = omega_straight)
+            self.calc_error(self.undisorted_image)
+
+        while self.error < 60 and self.error > 0:
+            self.publish_twisted(v=self._v, omega = omega_straight)
+            self.calc_error(self.undisorted_image) 
+            self.rate.sleep()
+        
+
+        self.stop()
 
         self.predict_turn = "straight"
         rospy.loginfo("done with the moving forward")
 
-    def turn_right(self):
-        distance_traveled = 0
-        dt = 0.1
-
-        while distance_traveled < self.right_turn_dist:
-            self.publish_twisted(v=self._v, omega = -2.5)
-            self.calc_error(self.undisorted_image)
+    def turn_right(self, omega_right = -3.5):
+        for i in range(5):
             self.rate.sleep()
-            distance_traveled += self._v * dt 
+            self.publish_twisted(v=self._v, omega = omega_right)
+            self.calc_error(self.undisorted_image)
+
+        while self.error < 60 and self.error > 0:
+            self.publish_twisted(v=self._v, omega = omega_right)
+            self.calc_error(self.undisorted_image) 
+            self.rate.sleep()
+            
+
+        self.stop()
 
         self.predict_turn = "straight"  
         rospy.loginfo("done with the right turn")
@@ -491,33 +538,221 @@ class MotionBotNode(DTROS):
                 return True, distance
             
         return False, float("inf")
+    
+    def detect_parking_tag(self):
+        if self.apriltag_image is None:
+            rospy.loginfo("no results")
+            return 0
 
-    def run(self):
+        detector = aptag.Detector(families="tag36h11")
+        # rospy.loginfo("Detecting...")
+        results = detector.detect(self.apriltag_image)
+        if len(results) < 1:
+            return 0
+
+        distance = -100
+        for largest_tag in results:
+            (ptA, ptB, ptC, ptD) = largest_tag.corners
+            ptA = (int(ptA[0]), int(ptA[1]))
+            ptB = (int(ptB[0]), int(ptB[1]))
+            ptC = (int(ptC[0]), int(ptC[1]))
+            ptD = (int(ptD[0]), int(ptD[1]))
+            diff = ((ptB[0] + ptC[0]) - (ptA[0] + ptD[0]))/2
+            # rospy.loginfo(ptA)
+            # rospy.loginfo(ptB)
+            # rospy.loginfo(ptC)
+            # rospy.loginfo(ptD)
+            if diff > distance:
+                distance = diff
         
+        return distance
+    
+    def tag_park_pid(self, tag_id):
+        control = self.pid_controller()
+        self.publish_twisted(v=self._v, omega = -1*control)
+        self.calc_error_tag(tag_id)
+        # rospy.loginfo("outer error "+ str(self.error))
+    
+    def calc_error_tag(self, tag_id):
+        if self.apriltag_image is None:
+            rospy.loginfo("no results")
+            return 0
+
+        detector = aptag.Detector(families="tag36h11")
+        # rospy.loginfo("Detecting...")
+        results = detector.detect(self.apriltag_image)
+        if len(results) < 1:
+            return 0
+
+        for largest_tag in results:
+            (ptA, ptB, ptC, ptD) = largest_tag.corners
+            ptA = (int(ptA[0]), int(ptA[1]))
+            ptB = (int(ptB[0]), int(ptB[1]))
+            ptC = (int(ptC[0]), int(ptC[1]))
+            ptD = (int(ptD[0]), int(ptD[1]))
+            # diff = ((ptB[0] + ptC[0]) - (ptA[0] + ptD[0]))/2
+            # rospy.loginfo(ptA)
+            # rospy.loginfo(ptB)
+
+            # rospy.loginfo(ptC)
+            # rospy.loginfo(ptD)
+            # rospy.loginfo(str(largest_tag.tag_id))
+            if tag_id == int(str(largest_tag.tag_id)):
+                rospy.loginfo("correct tag")
+                mid = ((ptB[0] + ptC[0] + ptA[0] + ptD[0]))/4
+                rospy.loginfo("Inner error "+ str(self.error))
+            else:
+                mid = 0
+                
+            self.error = mid - 130
+        return
+    
+    def park_pid(self):
+        # park_id = input("Please input the parking slot")
+        control = self.pid_controller()
+        self.publish_twisted(v=self._v, omega = 1*control)
+        self.calc_error_park(self.undisorted_image)
+    
+    def calc_error_park(self, imageFrame, distance=0.05):
+
+        height, weight = imageFrame.shape[:2]
+        imageFrame = imageFrame[height//2:-height//5, weight//2:, :]
+
+
+        imageFrame = cv2.GaussianBlur(imageFrame, (5, 5), 0)
+
+        kernel = np.ones((5, 5), "uint8") 
+
+        hsvFrame = cv2.cvtColor(imageFrame, cv2.COLOR_BGR2HSV)
+
+        white_mask = cv2.inRange(hsvFrame, self.white_lower, self.white_upper) 
+
+        # For white color 
+        white_mask = cv2.dilate(white_mask, kernel) 
+        res_white = cv2.bitwise_and(imageFrame, imageFrame, 
+                                mask = white_mask) 
+
+        lane_mask = np.zeros_like(white_mask)  
+        lane_mask[white_mask > 0] = 255 
+
+
+        contours, hierarchy = cv2.findContours(lane_mask, 
+                                            cv2.RETR_TREE, 
+                                            cv2.CHAIN_APPROX_SIMPLE) 
+        
+        if len(contours)>0:
+            # Sort contours by area in descending order and pick the top two
+            max_contour = sorted(contours, key=cv2.contourArea, reverse=True)[0]
+
+            x_values = max_contour[:, 0, 0]  # Extracting x-coordinates
+
+            # Compute the average x-coordinate
+            avg_x = np.mean(x_values)
+        else:
+            avg_x = 0
+
+
+        # self.error = avg_x - lane_mask.shape[1]/2.0 + 87
+        self.error = lane_mask.shape[1]/2.0 - avg_x - 30
+        # rospy.loginfo(self.error)
+        return lane_mask
+    
+    def detect_tag_sarah(self):
+        detector = aptag.Detector(families="tag36h11")
+        results = detector.detect(self.apriltag_park_image)
+
+        if results:
+
+            def area(r):
+                # Use corners to compute polygon area
+                (ptA, ptB, ptC, ptD) = r.corners
+                return 0.5 * abs(
+                    ptA[0]*ptB[1] + ptB[0]*ptC[1] + ptC[0]*ptD[1] + ptD[0]*ptA[1]
+                    - ptB[0]*ptA[1] - ptC[0]*ptB[1] - ptD[0]*ptC[1] - ptA[0]*ptD[1]
+                )
+
+            largest_tag = max(results, key=area)
+
+            tag_id = int(largest_tag.tag_id)
+            return tag_id, area(largest_tag)
+        else:
+            return None, float("inf")
+        
+    def run(self):
+
         self.rate.sleep()
-        if self.mode < 9:
-            leader_see, leader_distance, temp_dir = self.detect_leader_duckiebot(self.leader_duckiebot_image)
+
+        if self.when_to_detect_tag < 4:
+            self._v = 0.5
+        else:
+            self._v = 0.4
+
+        if self.when_to_detect_tag == 3 or self.when_to_detect_tag == 4:
+            temp_tag = self.detect_tag()
+            if temp_tag:
+                self.tag_id = temp_tag
+        
+        red_line_detected, red_line_distance = self.detect_red_line(self.redline_image)
+        if self.mode < 9 or self.mode == 12 or self.mode == 14:
+            leader_see, leader_distance, temp_dir = self.detect_leader_duckiebot(self.leader_duckiebot_turn)
             if leader_see:
                 self.predict_turn = temp_dir
         else:
             leader_see = False
             leader_distance = float("inf")
 
-       
-
         # checking if we should change the mode based on the info we are getting
-        # if self.mode == 14:
-        #     self.mode = 9
-        # if self.mode == 13 and self.counter_yellow_line == self.timer_yellow_line:
+        # if self.mode == 19 and self.counter_stop == self.timer_stop:
+        #     self.mode = 20
+        #     self.counter_stop = 0
+
+        # if self.mode == 19 and self.counter_stop < self.timer_stop:
+        #     self.counter_stop += 1
+
+        # if self.mode == 18 and red_line_distance < 0.6:
+        #     self.mode = 19
+        #     self.counter_stop = 0
+
+        # if self.mode == 17: 
+        #     if  self.stop_before_crosswalk < self.timer_stop_crosswalk and not self.detect_ducks(self.crosswalk_image):
+        #         self.stop_before_crosswalk +=1
+
+        # if self.mode == 17 and self.stop_before_crosswalk == self.timer_stop_crosswalk:
+        #     self.mode = 18
+        #     self.stop_before_crosswalk = 0
+        # if self.mode == 16  and self.detect_crosswalk(self.crosswalk_image):
+        #     self.mode = 17
+        #     self.stop_before_crosswalk = 0
+
+        # if self.mode == 15 and self.counter_yellow_line_left == self.timer_yellow_line_left:
+        #     self.counter_yellow_line_left = 0 
+        #     self.calibration *= -1
+        #     self.mode = 16
+
+        # if self.mode == 15 and self.counter_yellow_line_left < self.timer_yellow_line_left:
+        #     self.counter_yellow_line_left +=1
+
+        # if self.mode == 14 and self.counter_yellow_line_right == self.timer_yellow_line_right:
+        #     self.calibration *= -1
+        #     self.mode = 15
+        #     self.counter_yellow_line_left = 0
+        
+
+        # if self.mode == 14 and self.counter_yellow_line_right < self.timer_yellow_line_right:
+        #     self.counter_yellow_line_right +=1
+
+        # if self.mode == 13 and self.count_stop_for_broken == self.timer_stop_for_broken:
         #     self.mode = 14
+        #     self.count_stop_for_broken = 0
+        #     self.counter_yellow_line_right = 0
+            
 
+        # if self.mode == 13 and self.count_stop_for_broken < self.timer_stop_for_broken:
+        #     self.count_stop_for_broken += 1
 
-        # if self.mode == 13 and self.counter_yellow_line < self.timer_yellow_line:
-        #     self.counter_yellow_line += 1
-
-        # if self.mode == 12 and self.detect_broken_duckiebot(self.leader_duckiebot_image)[1] < 0.7:
+        # if self.mode == 12 and leader_distance < 0.55:
         #     self.mode = 13
-        #     self.counter_yellow_line = 0
+        #     self.count_stop_for_broken = 0
 
         # if self.mode == 11 and self.stop_before_crosswalk < self.timer_avoid_crosswalk:
         #     self.stop_before_crosswalk +=1
@@ -525,6 +760,7 @@ class MotionBotNode(DTROS):
         # if self.mode == 11 and self.stop_before_crosswalk == self.timer_avoid_crosswalk:
         #     self.mode = 12
         #     self.stop_before_crosswalk = 0
+            
         
         # if self.mode == 10: 
         #     if  self.stop_before_crosswalk < self.timer_stop_crosswalk and not self.detect_ducks(self.crosswalk_image):
@@ -533,8 +769,9 @@ class MotionBotNode(DTROS):
         # if self.mode == 10 and self.stop_before_crosswalk == self.timer_stop_crosswalk:
         #     self.mode = 11
         #     self.stop_before_crosswalk = 0
+            
         
-        # if self.mode == 9 and self.detect_crosswalk(self.crosswalk_image):
+        # if self.mode == 9  and self.detect_crosswalk(self.crosswalk_image):
         #     self.mode = 10
         #     self.stop_before_crosswalk = 0
 
@@ -545,29 +782,27 @@ class MotionBotNode(DTROS):
         # if self.mode == 5 or self.mode == 6 or self.mode == 7:
         #     self.mode = 0
 
-        # if self.mode == 4 and not leader_see:
+        # if (self.mode == 4 or self.mode == 3) and leader_distance > 0.6:
         #     self.mode = 0
             
-        # if self.mode == 4 and leader_distance >= 0.6:
+
+        # if self.mode != 1 and self.mode < 12 and leader_see and leader_distance >= 0.3 and leader_see and leader_distance <= 0.6:
         #     self.mode = 3
 
-        # if leader_see and leader_distance >= 0.6:
-        #     self.mode = 3
-
-        # if leader_see and leader_distance < 0.6:
+        # if self.mode != 1 and self.mode < 12  and leader_see and leader_distance < 0.3:
         #     self.mode = 4
 
+       
         # if self.mode == 1 and self.counter_stop < self.timer_stop: # 1 -> 1 stop for some time before the red line
         #     self.counter_stop += 1
-        #     see, _, temp_dir= self.detect_leader_duckiebot_turn(self.leader_duckiebot_turn)
-        #     rospy.loginfo("done with waiting for red line")
-        #     if see:
-        #         self.predict_turn = temp_dir
-            
 
+        
+        
         # if self.mode == 1 and self.counter_stop == self.timer_stop: # 1 -> 2 start moving without detecting the red line  
         #     rospy.loginfo(self.predict_turn )
         #     self.when_to_detect_tag += 1
+        #     if self.when_to_detect_tag == 2:
+        #         self.predict_turn = "straight"
         #     if self.when_to_detect_tag < 4 :
         #         if self.predict_turn == "straight":
         #             self.mode = 7
@@ -578,102 +813,157 @@ class MotionBotNode(DTROS):
         #         elif self.predict_turn == "right":
         #             self.mode = 6
         #             rospy.loginfo("right")
+        #     else:
+        #         rospy.loginfo("more than 4 stops")
 
         #     self.counter_stop = 0
             
         
         # if self.mode == 1 and  (self.when_to_detect_tag == 4 or self.when_to_detect_tag == 5):
-        #     self.tag_id = self.detect_tag()
         #     self.mode = 8
             
 
-        # if (self.mode == 0 or self.mode == 3 or self.mode == 4 or self.mode == 9) and self.detect_red_line(self.redline_image)[0]: #  0 -> 1 if detect_lane = true
+        # if (self.mode == 0 or self.mode == 3 or self.mode == 4 or self.mode == 9) and red_line_distance < 0.6: #  0 -> 1 if detect_lane = true
         #     self.mode = 1
-        #     self.count_stops = 0
-
-
-        # if (self.mode == 2 or self.mode == 4 or self.mode == 5) and self.counter_avoid_red < self.timer_avoid_redline: # 2 -> 2 still don't want to detect the red line
-        #     self.counter_avoid_red +=1
-
-        # if self.mode == 2 and self.counter_avoid_red == self.timer_avoid_redline: # 2 - > 0 you can check if you see red line
-        #     self.counter_avoid_red = 0
-        #     self.mode = 0
-        
-        
+        #     self.counter_stop = 0        
         
         # deciding what to do based on the mode we are in
         
         if self.mode == 0 or self.mode == 2:
             self.move_pid()
-            self.x = (1.0, 1.0, 1.0, 1.0) # white
+            rospy.loginfo(self.error)
+            self.x = (0.5, 0.8, 0.0, 0.3) # white
 
         if self.mode == 1: 
             self.stop()
-            self.x = (1.0, 1.0, 1.0, 1.0) # white
+            self.x = (0.5, 0.8, 0.0, 0.3) # white
         
         if self.mode == 3:
-            self.x = (0.0, 0.0, 1.0, 1.0) # green
+            self._v = 0.4
+            self.x = (0.8, 0.0, 0.0, 0.3) # green
             self.move_pid()
 
         if self.mode == 4:
-            self.x = (1.0, 0.0, 1.0, 1.0) # green
+            self.x = (1.0, 0.0, 1.0, 0.3) # 
             self.stop()
 
         if self.mode == 5:
-            self.x = (1.0, 1.0, 1.0, 1.0) # white
+            self.x = (0.5, 0.8, 0.0, 0.3) # white
             self.turn_left()
             
         if self.mode == 6:
-            self.x = (1.0, 1.0, 1.0, 1.0) # white
+            self.x = (0.5, 0.8, 0.0, 0.3) # white
             self.turn_right()
 
         if self.mode == 7:
-            self.x = (1.0, 1.0, 1.0, 1.0) # white
+            self.x = (0.5, 0.8, 0.0, 0.3) # white
             self.go_straight()
 
         if self.mode == 8:
+            rospy.loginfo("hi")
             if int(self.tag_id) == 48:
                 self.turn_right()
             elif int(self.tag_id) == 50:
                 self.turn_left()
 
-        if self.mode == 9 or self.mode == 11 or self.mode == 12:
+        if self.mode == 9 or self.mode == 11 or self.mode == 12 or self.mode == 16 or self.mode == 18:
             self.move_pid()
-            self.x = (1.0, 1.0, 1.0, 1.0) # white
+            self.x = (0.8, 0.0, 0.0, 0.3) # white
 
         if self.mode == 10:
             self.stop()
-            self.x = (1.0, 1.0, 0.0, 1.0) # white
+            self.x = (1.0, 1.0, 0.0, 0.3) 
 
-        if self.mode == 13:
-            self.move_pid()
-            self.x = (1.0, 0.5, 0.7, 1.0) # white
+        if self.mode == 13 or self.mode == 17 or self.mode == 19:
+            self.stop()
 
         if self.mode == 14:
-            self.x = (1.0, 1.0, 1.0, 1.0) # white
-            self.turn_right()
-            
+            self.move_pid()
+            self.x = (0.8, 0.0, 0.0, 0.3)
+        if self.mode == 15:
+            self.move_pid()
+            self.x = (0.8, 0.0, 0.0, 0.3)
 
+        if self.mode == 20:
+            rospy.loginfo("parking")
+            # park_slot = int(input("Please input the parking slot number"))
+            if self.park_slot == 1:
+                t, a = self.detect_tag_sarah()
+                while t is None or t!= 44 or (t == 44 and a < 3000):
+                    self.rate.sleep()
+                    self.move_pid()
+                    t, a = self.detect_tag_sarah()
+                    rospy.loginfo(a)
+
+                self.stop()
+                
+                    
+            elif self.park_slot == 2:
+                for i in range(5):
+                    self.rate.sleep()
+                    self.publish_twisted(v = self._v, omega = -1.5)
+
+                self.calibration = 140
+
+                t, a = self.detect_tag_sarah()
+                while t is None or t!= 58 or (t == 58 and a < 3000):
+                    self.rate.sleep()
+                    self.move_pid()
+                    t, a = self.detect_tag_sarah()
+                self.stop()
+            elif self.park_slot == 3:
+                for i in range(4):
+                    self.rate.sleep()
+                    self.publish_twisted(v = self._v, omega = 2.5)
+
+                self.calibration = 140
+
+                t, a = self.detect_tag_sarah()
+                while t is None or t!= 13 or (t == 13 and a < 2500):
+                    self.rate.sleep()
+                    self.move_pid()
+                    t, a = self.detect_tag_sarah()
+                    rospy.loginfo(a)
+                self.stop()
+            elif self.park_slot == 4:
+                for i in range(10):
+                    self.rate.sleep()
+                    self.publish_twisted(v = self._v, omega = 1)
+
+                t, a = self.detect_tag_sarah()
+                while t is None or t!= 47 or (t == 47 and a < 3000):
+                    self.rate.sleep()
+                    self.move_pid()
+                    t, a = self.detect_tag_sarah()
+                    rospy.loginfo(a)
+
+                self.stop()
 
         if self.x != self.prev_x :
             self.publish_leds(self.x)
 
         self.prev_x = self.x
 
+        # rospy.signal_shutdown("End of the run")
 
-        pass
+    
+   
 
 if __name__ == '__main__':
     # create the node
-    node = MotionBotNode(node_name='my_publisher_node')
+    sys.argv = rospy.myargv(argv=sys.argv)
+    if len(sys.argv) == 2 :
+        slot  = sys.argv[1]
+    node = MotionNode(node_name='my_publisher_node', sys_slot = slot)
 
-    rate = rospy.Rate(3)
+    rate = rospy.Rate(10)
+
+    node.publish_leds((0.0, 1.0, 0.0, 0.3))
     
     # run node
     while node.gray is None:
         rate.sleep()
 
-    node.publish_leds((1.0, 1.0, 1.0, 1.0))
     
     while not rospy.is_shutdown():
         node.run()
